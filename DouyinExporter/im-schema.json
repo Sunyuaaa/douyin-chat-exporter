@@ -1,0 +1,88 @@
+{
+  "_comment": [
+    "IM 接口字段表 / 消息类型表。抖音改版时优先改这个文件，不用重新打包：",
+    "app.py 启动时把它注入成 window.__DYIN_SCHEMA，injector.js 内置的同值默认仅作兜底。",
+    "源码方式改完重启软件即生效；exe 分发时它是包内文件，换文件即可（也可 --add-data 重打包）。",
+    "键名必须和 injector.js 里 SCHEMA_DEFAULT 一一对应；数组给空值等于不覆盖。",
+    "页面遇到没见过的 aweType 会往 boot.log 记一行 [schema-miss] aweType=xxx keys=[...]",
+    "（每种类型只记一次），照着 keys 补进 awe 表就行，不用重新逆向整个页面。"
+  ],
+  "version": "2026-10-11",
+  "ep": {
+    "imMessage": "https://imapi.douyin.com/v1/message/get_by_conversation",
+    "userInfo": "/aweme/v1/web/im/user/info/?aid=6383&device_platform=webapp&channel=channel_pc_web",
+    "batchPlayInfo": "/aweme/v1/web/maya/story/batch_play_info/v1/?device_platform=webapp&aid=6383&channel=channel_pc_web&app_name=douyin_web&pc_client_type=1"
+  },
+  "msg": {
+    "fConvId": 1,
+    "fServerId": 3,
+    "fTypeCode": 6,
+    "fSenderUid": 7,
+    "fContentJson": 8,
+    "fCreatedAtUs": 4,
+    "fRealMs": 10,
+    "fIsRecalled": 11,
+    "fVisible": 12,
+    "fSenderSecUid": 14,
+    "fSeq": 17,
+    "fReference": 18
+  },
+  "resp": {
+    "fPayload": 6,
+    "fBody": 301,
+    "fMessage": 1,
+    "fNextTs": 2,
+    "fHasMore": 3
+  },
+  "req": {
+    "fCmd": 1,
+    "fSub": 2,
+    "fVer": 3,
+    "fToken": 4,
+    "fSdk": 5,
+    "fRole": 6,
+    "fDevice": 7,
+    "fBody": 8,
+    "fSession": 9,
+    "fPlatform": 11,
+    "fPkg": 14,
+    "fRecvMode": 18,
+    "fBiz": 21,
+    "cmd": 301,
+    "sub": 10027,
+    "ver": "0.1.6",
+    "token": "",
+    "sdk": 3,
+    "role": 0,
+    "device": "fef1a80:p/lzg/store",
+    "session": "0",
+    "platform": "douyin_pc",
+    "pkg": "360000",
+    "recvMode": 1,
+    "biz": "douyin_pc",
+    "innerFConvId": 1,
+    "innerFDirection": 2,
+    "innerFShortId": 3,
+    "innerFCount": 4,
+    "innerFTs": 5,
+    "innerFQueryCount": 6,
+    "innerDirection": 1,
+    "innerCount": 1,
+    "queryCount": 50
+  },
+  "awe": {
+    "text": [0, 700, 701, 703, 712, 720],
+    "emoji": [500, 501, 507, 508, 510, 514, 516],
+    "image": [2702, 2703, 2704],
+    "shop": [11029, 10500, 10401],
+    "watchTogether": 9000,
+    "systemFrom": 100000
+  },
+  "share": {
+    "idFields": ["itemId", "item_id"],
+    "nestedIdPath": ["aweme_info", "item_id"],
+    "titleFields": ["content_title", "aweme_title"],
+    "authorFields": ["content_name"],
+    "descFields": ["description", "push_detail"]
+  }
+}

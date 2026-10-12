@@ -1,0 +1,27 @@
+# ── 依赖与打包产物（体积大、可重建，不入库）────────────────
+DouyinExporter/.venv/
+DouyinExporter/venv/
+DouyinExporter/build/
+DouyinExporter/dist/
+DouyinExporter/DouyinExporter.exe
+
+# ── 运行数据：登录态、聊天记录、导出结果 —— 任何情况下都不上传 ──
+DouyinExporter/Data/
+DouyinExporter/exports/
+DouyinExporter/boot.log
+DouyinExporter/media_cache/
+*.log
+
+# ── Python / 编辑器缓存 ────────────────────────────────
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/
+
+# ── 系统垃圾文件 ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/

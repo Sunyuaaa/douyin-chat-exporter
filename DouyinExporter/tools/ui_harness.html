@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>UI Harness — 不联网跑 injector.js 外壳（开发验证用）</title>
+<style>
+  html,body{margin:0;height:100%;background:#222;}
+  /* 右下角开发者条：只在 harness 里存在，产品里不会出现 */
+  #devbar{position:fixed;right:8px;bottom:8px;z-index:2147483647;background:#000;color:#0f0;
+    font:12px/1.5 Consolas,monospace;padding:8px 10px;border-radius:8px;max-width:420px;
+    box-shadow:0 4px 20px rgba(0,0,0,.6);}
+  #devbar button{font:inherit;background:#111;color:#0f0;border:1px solid #0f0;border-radius:6px;
+    padding:3px 7px;cursor:pointer;margin:2px 2px 0 0;}
+</style>
+</head>
+<body>
+<div id="devbar">
+  <b>UI HARNESS</b>（假登录 + 假 pywebview 桥，不联网）
+  <div id="devlog">就绪</div>
+  <button onclick="window.__seed()">重新注入假消息</button>
+  <button onclick="window.__dyce.showStep('1')">步骤1</button>
+  <button onclick="window.__dyce.showStep('2')">概览</button>
+  <button onclick="window.__dyce.showStep('reader')">阅读器</button>
+  <button onclick="window.__dyce.showStep('ai')">AI 分析</button>
+  <button onclick="window.__dyce.openGallery()">图片浏览</button>
+  <button onclick="window.__dyce.openAsr()">语音转文字</button>
+  <button onclick="document.getElementById('dyce-app').classList.toggle('dark')">切主题</button>
+</div>
+
+<script>
+/* 隐藏页面里 IntersectionObserver 一次都不回调（document.hidden=true），
+   带 ?forceIO=1 打开时换成「observe 即触发」的桩，用来验证媒体懒加载与失败分支 */
+if (location.search.indexOf('forceIO') >= 0) {
+  window.IntersectionObserver = function (cb) {
+    this.observe = function (el) { cb([{ target: el, isIntersecting: true }], this); };
+    this.unobserve = function () {}; this.disconnect = function () {};
+    this.takeRecords = function () { return []; };
+  };
+  window.__ioStub = true;
+}
+</script>
+<script>
+/* ---------- 1. 假页面 store（与 tools/fake_login.js 同源结构） ---------- */
+var ME = '9000000000000000000';
+function av(ch, bg) {
+  var c = document.createElement('canvas'); c.width = c.height = 64;
+  var x = c.getContext('2d');
+  x.fillStyle = bg; x.fillRect(0, 0, 64, 64);
+  x.fillStyle = '#fff'; x.font = '600 30px sans-serif';
+  x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(ch, 32, 34);
+  return c.toDataURL();
+}
+var convMap = new Map(), users = new Map();
+[['星河', 'SEC_peer1'], ['小满', 'SEC_peer2']].forEach(function (p, i) {
+  var peer = '100000000000000000' + (i + 1);
+  convMap.set('0:1:' + ME + ':' + peer, {
+    bizType: 1, shortId: 9001 + i, sortOrder: 1000 - i, coreInfo: {},
+    toParticipantSecUserId: p[1],
+    convId: '0:1:' + ME + ':' + peer
+  });
+  users.set(peer, { uid: peer, nickname: p[0], avatar_thumb: { url_list: [av(p[0][0], '#2f6bff')] } });
+});
+convMap.set('0:2:G1', { bizType: 2, shortId: 9501, sortOrder: 900,
+  coreInfo: { name: '家庭群', icon: '' }, toParticipantSecUserId: '', convId: '0:2:G1' });
+window.conversationStore = { conversationMap: convMap, curConversationId: '0:1:' + ME + ':1000000000000000001' };
+window.userInfoStore = { usersInfoMap: users, curLoginUserInfo: {
+  uid: ME, secUid: 'SEC_me', nickname: '我自己', avatarUrl: av('我', '#17a34a') } };
+
+/* ---------- 2. 假 pywebview 桥 ---------- */
+var PNG1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+function __cacheRead() {
+  try { return JSON.parse(localStorage.getItem('mock_voice_cache') || '{}') || {}; } catch (e) { return {}; }
+}
+var eid = 0, chunks = {}, reads = {}, exportsWritten = {}, mockMediaCount = {};
+window.__llmKey = 'sk-mock-000000001234';      // 当作「本机已存 Key」，让 ASR 流程可跑
+window.__llmUrl = 'https://mock/v1';
+window.pywebview = { api: {
+  log_event: function (m) {
+    (window.__srv = window.__srv || []).push(String(m));
+    console.log('[boot.log 模拟]', m); return { ok: 1 };
+  },
+  begin_export: function (n, f) { eid++; chunks[eid] = { n: n, f: f, p: [] }; return eid; },
+  append_export: function (i, c) {
+    if (window.__failAppend) return { ok: 0, error: '模拟：桥拒绝' };
+    chunks[i].p.push(c); return { ok: 1, chars: c.length };
+  },
+  finish_export: function (i) {
+    var o = chunks[i]; delete chunks[i];
+    var s = o.p.join('');
+    if (window.__failFinish) return { ok: false, error: '模拟：写入失败' };
+    if (!s) return { ok: false, error: '内容为空' };
+    exportsWritten[o.n + '.' + o.f] = s; window.__lastContent = s;
+    return { ok: 1, name: o.n + '.' + o.f, size: s.length, chunks: o.p.length };
+  },
+  save_export: function (f, c, n) {
+    if (window.__failSave) return { ok: false, error: '模拟：一次性写入失败' };
+    if (!c) return { ok: false, error: '内容为空' };
+    exportsWritten[n + '.' + f] = c; window.__lastSave = c;
+    return { ok: true, name: n + '.' + f, size: c.length,
+      msg: '已保存：' + n + '\\' + n + '.' + f };
+  },
+  cancel_export: function (i) { delete chunks[i]; return { ok: 1 }; },
+  get_exports_dir: function () { return { ok: 1, path: 'D:/harness/exports' }; },
+  list_export_convs: function () {
+    return { ok: 1, convs: Object.keys(exportsWritten).filter(function (k) { return k.endsWith('.json'); })
+      .map(function (k) {
+        var m = /"total"\s*:\s*(\d+)/.exec(exportsWritten[k].slice(0, 4096));
+        return { name: k.replace('.json', ''), size: exportsWritten[k].length,
+          mtime: Date.now(), total: m ? +m[1] : null };
+      }) };
+  },
+  overview_stats: function () {
+    /* 与 app.py 同口径：按 exports/ 里的 JSON meta.total 与 media/ 文件数汇总 */
+    var per = {}, msgs = 0, media = 0;
+    Object.keys(exportsWritten).forEach(function (k) {
+      if (!k.endsWith('.json')) return;
+      var nm = k.replace('.json', '');
+      var m = /"total"\s*:\s*(\d+)/.exec(exportsWritten[k].slice(0, 4096));
+      var t = m ? +m[1] : 0;
+      var mm = mockMediaCount[nm] || 0;
+      per[nm] = { total: t, media: mm };
+      msgs += t; media += mm;
+    });
+    return { ok: true, convs: Object.keys(per).length, messages: msgs,
+      media: media, perConv: per };
+  },
+  begin_read: function (c) {
+    var s = exportsWritten[c + '.json']; if (!s) return { ok: 0, error: '不存在' };
+    eid++; reads[eid] = { t: s, pos: 0 }; return { ok: 1, eid: eid, size: s.length };
+  },
+  read_next: function (i) {
+    var r = reads[i], part = r.t.slice(r.pos, r.pos + 120000); r.pos += part.length;
+    if (!part) { delete reads[i]; return { ok: 1, done: 1 }; }
+    return { ok: 1, done: 0, part: part };
+  },
+  begin_media: function (c, rel) { eid++; reads[eid] = { t: PNG1, pos: 0 };
+    /* 注意：这里必须是「一段合法 base64」。以前写的是 PNG1+PNG1，中间带 = 号，
+       atob 直接抛错，于是媒体成功分支从来没被跑到（看起来像"读不到"）。 */
+    return { ok: 1, eid: eid, size: 76, b64len: PNG1.length }; },
+  read_media_next: function (i) { return this.read_next(i); },
+  open_media: function () { return { ok: 1 }; },
+  export_media_zip: function (c, rels, lab) {
+    return { ok: 1, name: lab + '_' + rels.length + '个.zip', count: rels.length }; },
+  choose_export_dir: function () { return { ok: 0 }; },
+  open_exports: function () { window.__dl('open_exports 被调用'); return 'ok'; },
+  download_one: function (conv, task) {
+    return new Promise(function (res) {
+      setTimeout(function () {
+        mockMediaCount[conv] = (mockMediaCount[conv] || 0) + 1;
+        res({ ok: 1, rel: 'media/' + task.sub + '/' + task.sid +
+          (task.sub === 'voice' ? '.m4a' : task.sub === 'videos' ? '.mp4' : '.jpg'), size: 1024 });
+      }, 25);
+    });
+  },
+  get_llm_config: function () {
+    /* 与 app.py 新逻辑一致：明文 Key 不回传给页面，只回掩码 */
+    return { ok: 1, config: { base_url: window.__llmUrl || 'https://mock/v1',
+      model: window.__llmModel || 'mimo-v2.5-asr', api_key: '',
+      api_key_mask: window.__llmKey ? 'sk-m…2345（已保存 20 位）' : '',
+      has_key: !!window.__llmKey, key_protected: !!window.__llmKey,
+      configured: !!(window.__llmUrl !== '' && window.__llmKey) } }; },
+  save_llm_config: function (base_url, api_key, model, clear_key) {
+    window.__llmUrl = base_url || '';
+    window.__llmModel = model || 'mimo-v2.5-asr';
+    window.__llmKey = clear_key ? '' : (api_key || window.__llmKey || '');
+    window.__dl('save_llm_config: clear=' + clear_key + ' 现长度=' + window.__llmKey.length);
+    return { ok: 1, configured: !!window.__llmKey, has_key: !!window.__llmKey,
+      key_protected: !!window.__llmKey };
+  },
+  request_reset_login: function () {
+    window.__logout = (window.__logout || 0) + 1;
+    return { ok: 1, path: 'D:/harness/.logout_pending' };
+  },
+  set_titlebar: function (mode) {
+    /* 真软件里这里会去改 DWM 的标题栏配色 + 换窗口图标，浏览器里没有原生框 */
+    (window.__tb = window.__tb || []).push(String(mode));
+    return { ok: 1, mode: String(mode) };
+  },
+  voice_texts: function (conv) {
+    /* 模拟重启后本机 .txt 缓存还在（用 localStorage 持久，刷新页面不清空） */
+    var c = __cacheRead();
+    return { ok: true, texts: c, count: Object.keys(c).length };
+  },
+  transcribe_one: function (conv, sid) {
+    window.__tr = (window.__tr || 0) + 1;
+    return new Promise(function (res) {
+      setTimeout(function () {
+        var c = __cacheRead();
+        if (c[sid]) { res({ ok: 1, text: c[sid], cached: true }); return; }
+        var t = '模拟转写 #' + window.__tr + '（' + sid.slice(-4) + '）';
+        c[sid] = t;
+        try { localStorage.setItem('mock_voice_cache', JSON.stringify(c)); } catch (e) {}
+        res({ ok: 1, text: t });
+      }, 120);
+    });
+  },
+  test_transcribe: function () { return { ok: 1, text: '你好', ms: 800 }; }
+} };
+window.__exports = exportsWritten;
+/* 真实 pywebview 桥的所有方法都返回 Promise；这里统一包一层，模拟一致的行为 */
+Object.keys(window.pywebview.api).forEach(function (k) {
+  var f = window.pywebview.api[k];
+  window.pywebview.api[k] = function () {
+    return Promise.resolve(f.apply(window.pywebview.api, arguments));
+  };
+});
+window.__dl = function (m) { document.getElementById('devlog').textContent = m; };
+
+/* ---------- 3. 假页面接口（user/info、batch_play_info） ---------- */
+var of = window.fetch;
+window.fetch = function (url, opt) {
+  if (String(url).indexOf('im/user/info') >= 0) {
+    var ids = JSON.parse(decodeURIComponent((opt.body || '').replace('sec_user_ids=', ''))) || [];
+    return Promise.resolve({ json: function () { return Promise.resolve({ data: ids.map(function (s) {
+      return { sec_uid: s, uid: 'u' + s, nickname: '昵称_' + s.replace('SEC_', ''), remark_name: '',
+        avatar_thumb: { url_list: [av(s.slice(-1), '#8b5cf6')] } }; }) }); } });
+  }
+  if (String(url).indexOf('batch_play_info') >= 0) {
+    return Promise.resolve({ json: function () { return Promise.resolve({ data: { play_infos: [
+      { encrypted_url: { main_url: 'https://mock/enc.mp4' } }] } }); } });
+  }
+  return of.apply(this, arguments);
+};
+
+/* ---------- 4. 假消息（覆盖各类型，含新结构与不可解析） ---------- */
+var T0 = Date.now() - 3 * 864e5;
+window.__seed = function () {
+  var S = window.__dyce.state, id = '0:1:' + ME + ':1000000000000000001';
+  var mk = function (n, cj, mine, day) {
+    return { server_id: '700000000000000' + String(n).padStart(4, '0'), conv_id: id,
+      real_ms: T0 + day * 864e5 + n * 6e4, created_at_us: (T0 + day * 864e5) * 1000 + n,
+      sender_uid: mine ? ME : '1000000000000000001',
+      sender_sec_uid: mine ? 'SEC_me' : 'SEC_peer1',
+      content_json: typeof cj === 'string' ? cj : JSON.stringify(cj) };
+  };
+  var msgs = [
+    mk(1, { aweType: 700, text: '今晚吃火锅吗[流泪]' }, 1, 0),
+    mk(2, { aweType: 720, text: '@小满 看下这个链接', mention_users: [], richTextInfos: [] }, 0, 0),
+    mk(3, { aweType: 2702, resource_url: { origin_url_list: ['https://mock/1.jpg'], skey: 'A'.repeat(64) } }, 0, 0),
+    mk(4, { resource_url: { url_list: ['https://mock/1.m4a'] }, duration: 5200 }, 1, 0),
+    mk(5, { aweType: 11054, item_id: '7000000000000000001',
+            description: '[分享视频]这是假视频标题\n#假标签 #测试',
+            cover_url: { url_list: ['https://mock/cover.jpg'] },
+            aweme_info: { author_uid: '4000000000000001', item_id: '7000000000000000001' } }, 0, 1),
+    mk(6, { aweType: 11052, description: '分享商品:特惠双人套餐',
+            cover_url: { url_list: ['https://mock/p.jpg'] } }, 0, 1),
+    mk(7, { aweType: 500, url: { url_list: ['https://mock/e.gif'] }, emoji_type: 'favorite_emoji' }, 1, 1),
+    mk(8, { hello_text: '打个招呼吧', hint_text: '我们已互相关注，可以开始聊天了', nickname: '星河',
+            stickers: {}, joker_stickers: {} }, 0, 1),
+    mk(9, { tips: '对方回复或关注你之前，只能发送一条文字消息{{0}}', template: [{ key: 0, name: '（提示）' }] }, 1, 2),
+    mk(10, '', 0, 2),                                  // content_json 为空 → 无法解析
+    mk(11, { resource_url: { url_list: ['https://mock/2.m4a'] }, duration: 2300 }, 0, 2),
+    mk(12, { aweType: 2702, resource_url: { origin_url_list: ['https://mock/2.jpg'], skey: 'B'.repeat(64) } }, 1, 2)
+  ];
+  var m = new Map(); msgs.forEach(function (x) { m.set(x.server_id, x); });
+  S.msgByConv.set(id, m);
+  S.selectedIds = [id];
+  window.__dyce.refreshConversations().then(function () {
+    window.__dyce.renderConvList(); window.__dyce.updateSelText();
+    window.__dl('已注入 ' + msgs.length + ' 条假消息（含 720/11054/11052/打招呼/空内容）');
+  });
+  return msgs.length;
+};
+</script>
+<script>
+/* 与 app.py 一样的时序：先注入版本号/表情表/字段表，再加载 injector.js */
+(async function () {
+  window.__DYIN_VERSION = '1.1-harness';
+  window.__DYIN_EMOJI_MAP = { '[流泪]': 'https://mock/tear.png' };
+  try {
+    var r = await fetch('../im-schema.json?_=' + Date.now());
+    window.__DYIN_SCHEMA = await r.json();
+  } catch (e) { console.warn('im-schema.json 没读到，injector 将用内置默认', e); }
+  var s = document.createElement('script');
+  s.src = '../injector.js?_=' + Date.now();
+  s.onload = function () {
+    document.getElementById('devlog').textContent =
+      '外壳已加载，外部 schema: ' + (window.__DYIN_SCHEMA ? window.__DYIN_SCHEMA.version : '（用内置默认）');
+    setTimeout(window.__seed, 1600);
+  };
+  s.onerror = function () { document.getElementById('devlog').textContent = 'injector.js 加载失败'; };
+  document.documentElement.appendChild(s);
+})();
+</script>
+</body>
+</html>
