@@ -7,6 +7,8 @@ protobuf 接口翻页拉全量私信**（不模拟滚动、不抓 DOM），一�
 还能把聊天里的**图片 / 自拍视频 / 语音 / 表情下载到本地（自动解密）**，导出的 HTML 直接内嵌可离线播放的媒体。
 渲染内核复用 Windows 自带的 WebView2 Runtime（Chromium），程序本体约 30 MB。
 
+<img width="1156" height="777" alt="{204B5234-E9CD-4E07-9001-5EF43C2708CB}" src="https://github.com/user-attachments/assets/69f85212-7944-4b6e-827b-6a4674c292ee" />
+
 **界面与导出特性：**
 
 - **v1.1 全新界面**：扫码登录成功后自动进入「完整版」风格的全屏操作界面——左侧 40px 图标竖栏
