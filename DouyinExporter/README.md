@@ -1,5 +1,7 @@
 # 抖音聊天记录导出器（内置 WebView2 · 接口直连）
 
+> 读取聊天数据的核心逻辑参考 [TeamBreakerr/douyin-chat-export](https://github.com/TeamBreakerr/douyin-chat-export)（308★，未附许可证），详见文末「参考与致谢」。
+
 一个精简的 WebView2 桌面软件：软件内直接打开抖音网页版、**扫码登录**，然后**直接调用抖音 IM 的
 protobuf 接口翻页拉全量私信**（不模拟滚动、不抓 DOM），一键导出为 JSON / HTML / TXT / CSV；
 还能把聊天里的**图片 / 自拍视频 / 语音 / 表情下载到本地（自动解密）**，导出的 HTML 直接内嵌可离线播放的媒体。
@@ -228,13 +230,16 @@ DouyinExporter.exe（Python + pywebview 外壳，约 15 MB，含 Python 运行�
 
 本项目**读取聊天数据的核心逻辑**——不去模拟滚动、不抓 DOM，而是直接调用抖音 IM 的
 protobuf 接口（`POST /v1/message/get_by_conversation`），按会话 `shortId` 加响应里的
-`nextTs` 游标翻页直到 `hasMore=0`，从而一次拿到全量消息——参考了
+`nextTs` 游标翻页直到 `hasMore=0`，从而一次拿到全量消息——这条取数路线参考了
 [TeamBreakerr/douyin-chat-export](https://github.com/TeamBreakerr/douyin-chat-export)
-（MIT License）的实现，接口路径与翻页取数的方式均取自该项目。
+（308★，最后更新 2026-09）。
 
-在此之上另行完成的部分：字段表外置（`im-schema.json`）与内置兜底默认值、消息 protobuf
-编解码与 `aweType` 全类型渲染、媒体下载与解密（图片 AES-GCM / 视频 CENC / HEIC 转 JPEG）、
+需要写清楚边界：**该仓库没有附带任何许可证文件**，按著作权默认「保留所有权利」。所以本项目
+参考的是它的**思路与接口用法**——接口路径、字段编号、翻页游标这类事实信息；而下面这些是本仓库
+内独立实现的：字段表外置（`im-schema.json`）与内置兜底默认值、消息 protobuf 编解码与
+`aweType` 全类型渲染、媒体下载与解密（图片 AES-GCM / 视频 CENC / HEIC 转 JPEG）、
 语音转文字与限流退避、四种导出格式、离线阅读器 HTML，以及 WebView2 桌面外壳和整套界面。
+若今后要直接引入它的源码，需先向作者取得许可。
 
 ## 从源码运行 / 自行修改
 
