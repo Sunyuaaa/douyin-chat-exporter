@@ -224,6 +224,18 @@ DouyinExporter.exe（Python + pywebview 外壳，约 15 MB，含 Python 运行�
 
 早期版本误用 field 4，会出现历史消息日期都挤在同一天的问题；现已改用 field 10，日期与实际一致。
 
+## 参考与致谢
+
+本项目**读取聊天数据的核心逻辑**——不去模拟滚动、不抓 DOM，而是直接调用抖音 IM 的
+protobuf 接口（`POST /v1/message/get_by_conversation`），按会话 `shortId` 加响应里的
+`nextTs` 游标翻页直到 `hasMore=0`，从而一次拿到全量消息——参考了
+[TeamBreakerr/douyin-chat-export](https://github.com/TeamBreakerr/douyin-chat-export)
+（MIT License）的实现，接口路径与翻页取数的方式均取自该项目。
+
+在此之上另行完成的部分：字段表外置（`im-schema.json`）与内置兜底默认值、消息 protobuf
+编解码与 `aweType` 全类型渲染、媒体下载与解密（图片 AES-GCM / 视频 CENC / HEIC 转 JPEG）、
+语音转文字与限流退避、四种导出格式、离线阅读器 HTML，以及 WebView2 桌面外壳和整套界面。
+
 ## 从源码运行 / 自行修改
 
 ```powershell
