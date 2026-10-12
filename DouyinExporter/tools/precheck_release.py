@@ -92,6 +92,8 @@ def main():
 
     exe = BASE / "DouyinExporter.exe"
     readme = BASE / "README.md"
+    if not readme.exists():
+        readme = BASE.parent / "README.md"      # README 已上移到仓库根，两处都认
     if exe.exists():
         infos.append("DouyinExporter.exe 已在目录内（%s），可直接按 README 双击使用"
                      % human(exe.stat().st_size))
