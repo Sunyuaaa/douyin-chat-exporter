@@ -6,7 +6,7 @@
 
 <p align="center">
   <img width="32%" alt="操作界面" src="https://github.com/user-attachments/assets/69f85212-7944-4b6e-827b-6a4674c292ee" />
-  <img width="32%" alt="阅读器界面" src="https://github.com/user-attachments/assets/2fee4720-1d9d-4324-8377-7c6a83aac649" />
+  <img width="32%" alt="阅读器界面" src="https://github.com/user-attachments/assets/3e451c3e-82de-4a9d-a3c4-c6a5ccd2d34a" />
   <img width="32%" alt="导出结果" src="https://github.com/user-attachments/assets/a1a47945-45fd-4760-acf6-ab22fd2e4a8d" />
 </p>
 
