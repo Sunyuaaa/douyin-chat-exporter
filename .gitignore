@@ -2,6 +2,7 @@
 DouyinExporter/.venv/
 DouyinExporter/venv/
 DouyinExporter/build/
+DouyinExporter/_build/
 DouyinExporter/dist/
 DouyinExporter/DouyinExporter.exe
 
