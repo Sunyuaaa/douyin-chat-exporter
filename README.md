@@ -9,7 +9,7 @@ protobuf 接口翻页拉全量私信**（不模拟滚动、不抓 DOM），一�
 
 <img width="1156" height="777" alt="{204B5234-E9CD-4E07-9001-5EF43C2708CB}" src="https://github.com/user-attachments/assets/69f85212-7944-4b6e-827b-6a4674c292ee" />
 
-<img width="1952" height="1312" alt="image" src="https://github.com/user-attachments/assets/2fee4720-1d9d-4324-8377-7c6a83aac649" />
+<img width="1952" height="1312" alt="image" src="https://github.com/user-attachments/assets/3e451c3e-82de-4a9d-a3c4-c6a5ccd2d34a" />
 
 
 <img width="1063" height="724" alt="{F69A082C-26F6-4C58-B330-E7A9EFADFA51}" src="https://github.com/user-attachments/assets/a1a47945-45fd-4760-acf6-ab22fd2e4a8d" />
