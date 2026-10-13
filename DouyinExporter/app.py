@@ -19,6 +19,7 @@ import threading
 import traceback
 import subprocess
 import shutil
+import webbrowser
 import ctypes
 import ctypes.wintypes
 import urllib.request
@@ -47,6 +48,9 @@ EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 _BOOT_LOG = BASE / "boot.log"
 APP_VERSION = "1.1"
+# 设置「关于」里那行链接允许打开的地址白名单：页面只能把这个整串交给 open_repo，
+# 别的 host / 协议一律拒绝，避免注入出去的桥被外部页面拿去开任意 URL。
+REPO_URLS = ("https://github.com/Sunyuaaa/douyin-chat-exporter",)
 
 
 def log(msg: str) -> None:
@@ -1081,6 +1085,19 @@ class JsApi:
             return {"ok": True, "text": text, "ms": ms}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
+
+    def open_repo(self, url):
+        """在系统浏览器打开项目仓库地址；只认 REPO_URLS 白名单，其余一律不开。"""
+        u = str(url or "").strip()
+        if not any(u == base or u.startswith(base + "/") for base in REPO_URLS):
+            log("[关于] open_repo 拒绝非白名单地址：" + u[:120])
+            return {"ok": False, "reason": "只允许打开项目仓库地址"}
+        try:
+            webbrowser.open(u)
+            return {"ok": True, "url": u}
+        except Exception as e:  # noqa: BLE001
+            log("[关于] 打开浏览器失败：%r" % (e,))
+            return {"ok": False, "reason": repr(e)}
 
     def open_exports(self):
         try:

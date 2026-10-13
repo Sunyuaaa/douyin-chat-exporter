@@ -15,6 +15,7 @@
 """
 import json
 import os
+import re
 import sys
 import subprocess
 import tempfile
@@ -297,6 +298,41 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         app.subprocess.run, app.shutil.which = real_run, real_which
         media.subprocess.run, media.shutil.which = real_mrun, real_mwhich
+
+# ---------- 9b) 设置「关于」里的仓库链接：只认白名单地址 ----------
+with tempfile.TemporaryDirectory() as tmp:
+    api = fresh_api(tmp)
+    opened = []
+    real_wb = getattr(app, "webbrowser", None)
+
+    class _FakeWB:
+        def open(self, u):
+            opened.append(u)
+            return True
+
+    app.webbrowser = _FakeWB()
+    try:
+        base = app.REPO_URLS[0]
+        r = api.open_repo(base)
+        chk("白名单地址放行并交给浏览器", r.get("ok") and opened == [base], str(r))
+        opened.clear()
+        r = api.open_repo(base + "/issues/1")
+        chk("仓库自己的子路径同样放行", r.get("ok") and opened == [base + "/issues/1"], str(r))
+        opened.clear()
+        r = api.open_repo("https://evil.example.com/x")
+        chk("别的 host 直接拒、不发打开调用", not r.get("ok") and opened == [], str(r))
+        r1, r2 = api.open_repo("file:///C:/Windows/system32/calc.exe"), api.open_repo(None)
+        chk("file:// 与空值同样被拒", not r1.get("ok") and not r2.get("ok") and opened == [],
+            str(r1) + " / " + str(r2))
+        js = (Path(__file__).resolve().parent / "injector.js").read_text(encoding="utf-8")
+        m = re.search(r"var REPO_URL = '([^']+)'", js)
+        chk("页面显示的地址与 Python 白名单是同一串",
+            bool(m) and m.group(1) == base, (m.group(1) if m else "injector.js 里没找到 REPO_URL"))
+    finally:
+        if real_wb is None:
+            del app.webbrowser
+        else:
+            app.webbrowser = real_wb
 
 # ---------- ffmpeg 查找顺序（PATH → 程序目录的 ffmpeg.exe → 内置 imageio-ffmpeg）----------
 with tempfile.TemporaryDirectory() as tmp:

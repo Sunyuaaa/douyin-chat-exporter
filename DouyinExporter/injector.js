@@ -47,6 +47,10 @@
      抖音改版时只改 im-schema.json（或替换打包同目录的这个文件）就够了，不用重编译。
      这里内置一份同值默认，读不到外部文件也能跑。
      CHECK-START：tools/check_render.js 从这行往后抠代码做离线回归，别删。 */
+  /* 项目仓库地址：设置「关于」里那一行显示它，点击时整串交给 Python 侧白名单校验后
+     在系统浏览器打开（app.open_repo）。显示与打开用的是同一个常量，不会两处不同步。 */
+  var REPO_URL = 'https://github.com/Sunyuaaa/douyin-chat-exporter';
+  function repoLabel() { return REPO_URL.replace(/^https?:\/\//, ''); }
   var SCHEMA_DEFAULT = {
     version: 'builtin',
     ep: {
@@ -2223,6 +2227,9 @@
 #dyce-app .set-head { display: flex; justify-content: space-between; align-items: center;
   font-size: 16px; }
 #dyce-app .set-card .lbl:first-of-type { margin-top: 18px; }
+/* 「关于」里那行仓库链接：只用主色点一下，不套按钮不画框 */
+#dyce-app .set-card .lk { color: var(--accent); cursor: pointer; word-break: break-all; }
+#dyce-app .set-card .lk:hover { text-decoration: underline; }
 #dyce-chip { position: fixed; top: 14px; left: 14px; z-index: 2147483646; display: block;
   padding: 9px 16px; border-radius: 999px; background: #ffd60a; color: var(--text);
   font: 700 13px/1.4 -apple-system, "Microsoft YaHei", sans-serif;
@@ -3992,6 +3999,16 @@
   function openExports() {
     try { var api = readerApi(); if (api && api.open_exports) api.open_exports(); } catch (e) {}
   }
+  /* 「关于」里那行仓库链接：地址交给 Python 侧白名单校验后才在浏览器打开 */
+  function openRepo() {
+    try {
+      var api = readerApi();
+      if (!api || !api.open_repo) { log('open_repo 桥不可用'); return; }
+      Promise.resolve(api.open_repo(REPO_URL)).then(function (r) {
+        if (r && r.ok === false) log('打开仓库被拒：' + (r.reason || ''));
+      });
+    } catch (e) { log('打开仓库链接失败：' + e.message); }
+  }
   function toggleSelectAll() {
     var ids = $$('#convList .conv').map(function (d) { return d.dataset.id; });
     if (!ids.length) return;
@@ -4558,6 +4575,8 @@
           '<p class="hint">抖音聊天记录导出器 v' + escHtml(window.__DYIN_VERSION || '1.1') + '<br>' +
             '数据仅保存在本机，不上传任何服务器。<br>' +
             '模型 API Key 用 Windows 账号绑定的 DPAPI 加密存放，界面里只显示掩码。<br>' +
+            '源码与更新：<span class="lk" id="setRepo" title="在系统浏览器打开项目仓库">' +
+            escHtml(repoLabel()) + '</span><br>' +
             '仅限备份本人账号数据，请勿传播导出内容。</p>',
           '<div class="row" style="justify-content:flex-end;margin-top:16px">',
             '<button class="pill" id="setLogout" title="删除本机 Data/ 登录数据，下次启动需要重新扫码">清除登录态</button>',
@@ -4675,6 +4694,7 @@
     });
     $('#btnBrowseDir').addEventListener('click', browseDir);
     $('#setOpenData').addEventListener('click', openExports);
+    $('#setRepo').addEventListener('click', openRepo);
     $('#btnRefresh').addEventListener('click', function () { refreshConversations(); });
     $('#btnCurrent').addEventListener('click', useCurrent);
     $('#btnSelectAll').addEventListener('click', toggleSelectAll);

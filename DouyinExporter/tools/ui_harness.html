@@ -151,6 +151,11 @@ window.pywebview = { api: {
     return { ok: 1, name: lab + '_' + rels.length + '个.zip', count: rels.length }; },
   choose_export_dir: function () { return { ok: 0 }; },
   open_exports: function () { window.__dl('open_exports 被调用'); return 'ok'; },
+  /* 关于里的仓库链接：照 app.open_repo 的白名单行为假装打开 */
+  open_repo: function (url) {
+    window.__repoCalls = (window.__repoCalls || []); window.__repoCalls.push(url);
+    var ok = url === 'https://github.com/Sunyuaaa/douyin-chat-exporter';
+    return { ok: ok, url: url, reason: ok ? null : '只允许打开项目仓库地址' }; },
   /* 右键「单独保存」：记下参数并假装用户选了 Downloads 里的同名文件 */
   save_media_as: function (conv, rel) {
     window.__saveCalls = (window.__saveCalls || []); window.__saveCalls.push([conv, rel]);

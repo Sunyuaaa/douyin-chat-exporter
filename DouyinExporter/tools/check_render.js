@@ -22,7 +22,7 @@ if (mark < 0 || a <= 1 || b < 0 || b <= a) {
 const box = new Function('window', src.slice(a, b) +
   '\nreturn { render: render, buildRequest: buildRequest, parseResponse: parseResponse,' +
   ' SC: SC, missSeen: missSeen, concatArrays: concatArrays, es: es, evf: evf, eb: eb,' +
-  ' emojiKey: emojiKey };');
+  ' emojiKey: emojiKey, REPO_URL: REPO_URL, repoLabel: repoLabel };');
 
 let fails = 0;
 function chk(name, ok, detail) {
@@ -200,6 +200,21 @@ if (fs.existsSync(expDir)) {
   chk('SHELL_CSS 内没有 // 注释（CSS 里它是垃圾字符，会吞掉下一条规则）',
     !!css && bad.length === 0,
     bad.length ? bad.slice(0, 3).map(x => x[0] + ': ' + x[1].trim().slice(0, 60)).join(' | ') : '（干净）');
+}
+
+// ---------- 7) 设置「关于」里那行仓库链接 ----------
+{
+  const repo = 'https://github.com/Sunyuaaa/douyin-chat-exporter';
+  chk('REPO_URL 就是仓库地址且是 https', api.REPO_URL === repo, api.REPO_URL);
+  chk('显示用的短形去掉协议且与白名单同源', api.repoLabel() === repo.slice('https://'.length),
+    api.repoLabel());
+  // 显示、点击、样式三处都要挂上，少一处就是"看得见点不动"或"能点但没接线"
+  chk('关于段落渲染了 #setRepo', src.indexOf("id=\"setRepo\"") > 0);
+  chk('点击走 open_repo 桥并带上 REPO_URL', /api\.open_repo\(REPO_URL\)/.test(src));
+  chk('#setRepo 绑定了点击事件', src.indexOf("$('#setRepo').addEventListener('click', openRepo)") > 0);
+  const a3 = src.indexOf('var SHELL_CSS = `');
+  const b3 = src.indexOf('`;', a3);
+  chk('链接有自绘样式（主色 + 手型，不套按钮）', /#dyce-app \.set-card \.lk \{/.test(src.slice(a3, b3)));
 }
 
 // ---------- helpers ----------
