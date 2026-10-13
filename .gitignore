@@ -26,3 +26,9 @@ __pycache__/
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
+# 网盘同步/上传时留下的临时控制文件（里面带本地绝对路径，不入库）
+*.baiduyun.uploading.cfg
+
+# ── Qoder 会话产物（令牌统计、临时画布，与代码无关）────────
+.qoder-credits/
+.token-inspector/

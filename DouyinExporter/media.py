@@ -17,7 +17,6 @@ HEIC/HEIF 图片浏览器不支持，尽量转 JPEG（需 pillow_heif；缺失�
 """
 import io
 import json
-import os
 import shutil
 import struct
 import subprocess

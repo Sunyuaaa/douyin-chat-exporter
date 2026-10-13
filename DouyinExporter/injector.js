@@ -30,7 +30,7 @@
     range: 'all',           // 导出时间范围 all | 3m | custom
     dateStart: '', dateEnd: '',
     mediaOpts: { image: 1, video: 1, voice: 1, emoji: 1 },
-    recentExports: [],      // 最近导出记录（概览展示）
+    recentExports: [],      // 本次运行导出成功的文件（步骤条据此判定「导出」完成）
     asr: false,             // 语音转文字开关（跟随下载媒体执行）
     asrText: {},            // sid -> 转写文本（本会话内存，导出时写入 JSON/HTML）
     asrErrShown: 0,         // 配置缺失/失败提示只弹一次
@@ -401,10 +401,10 @@
   function noteSaved(r) {
     log('已保存 ' + r.name + '（' + r.size + ' 字节）');
     try {
-      state.recentExports.unshift({ name: r.name, size: r.size, at: Date.now(),
-        conv: String(r.name || '').replace(/\.(json|html|txt|csv)$/i, '') });
+      // 只留步骤条判定「导出」要用的信息（概览的最近导出列表已删）
+      state.recentExports.unshift({ name: r.name, size: r.size, at: Date.now() });
       if (state.recentExports.length > 8) state.recentExports.pop();
-      updateRecentUI();
+      updateStepChecks();
     } catch (e) {}
   }
   function chunkedDeliver(ext, content, name) {
@@ -658,6 +658,21 @@
              text: awe < 0 ? '[无内容 · 无法解析（可能已撤回或为该客户端专有卡片）]'
                            : '[未支持的消息类型 ' + awe + ']' };
   }
+  /* 表情包合集的去重判据（放在 CHECK 段里，tools/check_render.js 会拿真实地址回归它）。
+     同一个表情反复发是常态，只留一张。判据取 CDN 地址路径的**最后两段**（桶 + 对象 id）：
+     同一张表情会从 p3-sign / p26-sign / p5-ex-gddgtc-sign 等不同主机下发，甚至 `url.uri`
+     也不一致，用整条去参 URL 或 uri 都会漏（实测 8 个会话里最多一条留 125 张重复图）。
+     拿不到地址时退回本地文件名——每行唯一，宁可少并也不要误并成一张。 */
+  function emojiKey(r) {
+    var u = String((r && r.emojiUrl) || '');
+    var path = u.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '').split('?')[0];
+    var segs = path.split('/').filter(function (x) { return !!x; })
+      // `~tplv-…` 是同一个对象的不同尺寸 / 格式变体，剪掉才算同一张
+      .map(function (x) { return x.split('~')[0]; });
+    if (segs.length >= 2) return segs.slice(-2).join('/');
+    if (segs.length === 1) return segs[0];
+    return 'file:' + String((r && r.local) || '');
+  }
   /* CHECK-END：上面这一整段（字段表 + protobuf + 工具 + 会话枚举 + render）可脱离页面单独求值 */
 
   /* ============ 全量拉取（多会话） ============ */
@@ -737,6 +752,84 @@
     t.style.display = 'block';
     clearTimeout(_toastTimer);
     _toastTimer = setTimeout(function () { t.style.display = 'none'; }, 2200);
+  }
+  /* ---- 自绘悬浮提示：把浏览器原生气泡（灰底方框，跟这套界面完全不搭）换掉 ----
+     做法：hover 时把元素的 title 挪到 data-tip 并删掉 title（原生提示就不会再冒出来），
+     用一枚圆角卡片浮层显示。排序按钮、补下载按钮这些运行中改写 title 的地方，
+     下次 hover 会重新挪一次，所以不需要每处渲染都手动处理。 */
+  var _tipEl = null, _tipFor = null;
+  function tipLayer() {
+    if (_tipEl && _tipEl.parentNode) return _tipEl;
+    var d = document.createElement('div');
+    d.className = 'dytip';
+    d.hidden = true;
+    ($('#dyce-app') || document.body).appendChild(d);
+    _tipEl = d;
+    return d;
+  }
+  function tipShow(el, text) {
+    var d = tipLayer();
+    d.textContent = text;                 // textContent：title 里的内容不会被当成 HTML
+    d.hidden = false;
+    var r = el.getBoundingClientRect(), vw = window.innerWidth, vh = window.innerHeight;
+    var w = d.offsetWidth, h = d.offsetHeight;
+    var x = Math.min(Math.max(6, r.left + r.width / 2 - w / 2), Math.max(6, vw - w - 6));
+    var y = r.bottom + 8;                 // 默认贴在元素下方，放不下就翻到上方
+    if (y + h > vh - 6) y = Math.max(6, r.top - h - 8);
+    d.style.left = x + 'px';
+    d.style.top = y + 'px';
+    _tipFor = el;
+  }
+  function tipHide() {
+    if (_tipEl) _tipEl.hidden = true;
+    _tipFor = null;
+  }
+  function tipOver(e) {
+    var app = $('#dyce-app');
+    var el = e.target && e.target.closest ? e.target.closest('[title],[data-tip]') : null;
+    if (!app || !el || !app.contains(el)) { tipHide(); return; }
+    var t = '';
+    if (el.hasAttribute('title')) {
+      t = el.getAttribute('title') || '';
+      el.setAttribute('data-tip', t);
+      el.removeAttribute('title');        // 挪走原生气泡的唯一办法
+    } else t = el.getAttribute('data-tip') || '';
+    t = String(t).replace(/\s+$/, '');
+    if (!t.trim()) { tipHide(); return; }
+    tipShow(el, t);
+  }
+  function tipOut(e) {
+    if (!_tipFor) return;
+    var to = e.relatedTarget;
+    if (to && to.nodeType === 1 && _tipFor.contains(to)) return;   // 移进子元素（svg 图标）不算离开
+    tipHide();
+  }
+  document.addEventListener('mouseover', tipOver, true);
+  document.addEventListener('mouseout', tipOut, true);
+  document.addEventListener('mousedown', tipHide, true);
+  window.addEventListener('scroll', tipHide, true);
+  window.addEventListener('blur', tipHide);
+
+  /* 带按钮的对话框：需要用户「知道 + 决定下一步」时用（toast 只能看，不能点） */
+  function dlHide() {
+    var m = $('#dyce-dlg');
+    if (m) m.classList.remove('show');
+  }
+  function dlShow(title, body, actions) {
+    var m = $('#dyce-dlg');
+    if (!m) { showToast(title + '：' + String(body).replace(/\n/g, ' ')); return; }
+    $('#dlgT').textContent = title;
+    $('#dlgB').textContent = body;              // textContent + CSS pre-line：换行照用，不当 HTML
+    var f = $('#dlgF');
+    f.innerHTML = '';
+    (actions || [{ label: '知道了' }]).forEach(function (a) {
+      var b = document.createElement('button');
+      b.className = 'big' + (a.primary ? ' primary' : '') + (a.danger ? ' danger' : '');
+      b.textContent = a.label;
+      b.addEventListener('click', function () { dlHide(); if (a.fn) a.fn(); });
+      f.appendChild(b);
+    });
+    m.classList.add('show');
   }
   /* 设置界面内的通知框：成功整框替换（✓ 绿），错误逐条累加进同一个框（✗ 红），
      不再用顶部 toast——toast 会被设置弹层盖住，且多条提示会铺满顶部。 */
@@ -1694,7 +1787,6 @@
 /* ── 主区两栏 ── */
 #dyce-app .cols { position: relative; display: grid; grid-template-columns: 330px minmax(0, 1fr);
   gap: 8px; min-height: 0; height: 100%; }
-#dyce-app .cols.solo { grid-template-columns: minmax(0, 1fr); }
 #dyce-app .left { position: relative; background: var(--card); border: 1px solid var(--line);
   border-radius: 14px; box-shadow: var(--shadow);
   display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
@@ -1740,8 +1832,6 @@
 #dyce-app .conv .pv { font-size: 12.5px; color: var(--muted); margin-top: 3px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 #dyce-app .conv .cnt { font-size: 12px; color: var(--muted); white-space: nowrap; }
-#dyce-app .left-foot { padding: 10px 14px; border-top: 1px solid var(--line); font-size: 12px;
-  color: var(--muted); min-height: 38px; max-height: 170px; overflow-y: auto; }
 /* 底部进度区：行内进度条、两行进度文字、红色流水都删了——进度只在毛玻璃弹窗里，
    失败改走 toast。这里只剩「正在执行」一条，且平时整块隐藏（setBusy 控制显隐）。 */
 #dyce-app .proc { display: none; margin-top: 22px; padding-top: 16px;
@@ -1838,45 +1928,52 @@
 #dyce-app .big.primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
 #dyce-app .big.running { background: #e8686a; border-color: #e8686a; color: #fff; }
 #dyce-app .grow { flex: 1; min-width: 180px; }
-/* 时间范围：分段按钮与起止日期同一行（日期靠右），选「自定义」才出现日期块 */
+/* 时间范围：分段按钮与起止日期同一行，日期块紧跟在分段按钮后面（不再顶到最右） */
 #dyce-app .rangegroup { position: relative; display: flex; align-items: center;
   flex-wrap: wrap; gap: 10px; }
-#dyce-app .daterange { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+#dyce-app .daterange { display: flex; align-items: center; gap: 8px; }
 #dyce-app .daterange[hidden] { display: none; }
-#dyce-app .daterange .dash { color: var(--muted2); }
-#dyce-app .datefield { border: 1px solid var(--line); background: var(--card); color: var(--text);
-  border-radius: 9px; padding: 8px 12px; font: inherit; font-size: 13px; min-width: 116px;
-  text-align: center; cursor: pointer; }
-#dyce-app .datefield:hover { border-color: var(--accent); color: var(--accent); }
-#dyce-app .datefield.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
-#dyce-app .datefield.empty { color: var(--muted2); }
-#dyce-app .range-cal { top: 46px; right: 0; left: auto; }
-/* ── 概览 ── */
-#dyce-app .ov-user { display: flex; flex-direction: column; align-items: center;
-  text-align: center; gap: 8px; }
-#dyce-app .ov-user .ov-img { width: 72px; height: 72px; border-radius: 50%; object-fit: cover;
+#dyce-app .daterange .dash { color: var(--accent); font-weight: 700; }
+/* 起止日期：蓝底描边，一眼看出这是要填的两格；没填时字轻一点 */
+#dyce-app .datefield { border: 1px solid var(--accent); background: var(--accent-soft);
+  color: var(--accent); border-radius: 9px; padding: 8px 14px; font: inherit; font-size: 13px;
+  font-weight: 700; min-width: 122px; text-align: center; cursor: pointer;
+  box-shadow: 0 1px 2px rgba(47,107,255,.14); }
+#dyce-app .datefield.empty { font-weight: 600; opacity: .8; }
+#dyce-app .datefield:hover { box-shadow: 0 2px 8px rgba(47,107,255,.24); }
+#dyce-app .datefield.on { box-shadow: 0 0 0 3px var(--card), 0 0 0 5px var(--accent); }
+/* 日历弹层横向位置由 rangeCalOpen 按点开的按钮算，别顶在行尾 */
+#dyce-app .range-cal { top: 46px; right: auto; }
+/* ── 阅读器侧栏标题上的「数据概览」下拉（概览页已删，只留这三项统计）── */
+#dyce-app .rd-head-tools { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+#dyce-app .rd-head .msg-tool { width: 26px; height: 26px; border-radius: 8px; }
+#dyce-app .rd-head .msg-tool svg { width: 15px; height: 15px; transition: transform .15s; }
+#dyce-app .rd-head .msg-tool.on { border-color: var(--accent); color: var(--accent);
   background: var(--accent-soft); }
-#dyce-app .ov-user .ov-ph { width: 72px; height: 72px; border-radius: 50%; background: var(--accent-soft);
-  color: var(--accent); font-size: 28px; font-weight: 600; display: flex; align-items: center;
-  justify-content: center; }
-#dyce-app .ov-name { font-size: 18px; font-weight: 700; }
-#dyce-app .ov-sub { font-size: 13px; color: var(--muted); }
-#dyce-app .ov-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 26px auto 22px; max-width: 640px; }
-#dyce-app .ov-stats > div { text-align: center; }
-#dyce-app .ov-stats small { display: block; font-size: 13px; color: var(--muted); }
-#dyce-app .ov-stats b { display: block; font-size: 30px; font-weight: 700; line-height: 1.25; }
-#dyce-app .ov-stats em { display: block; font-size: 12.5px; color: var(--muted); font-style: normal; }
-#dyce-app .exp-details { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-#dyce-app .exp-item { display: flex; justify-content: space-between; gap: 10px; font-size: 13px;
-  padding: 9px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
-#dyce-app .exp-item .exp-l { display: flex; align-items: center; gap: 9px; min-width: 0; }
-#dyce-app .exp-item .exp-av { position: relative; width: 26px; height: 26px; flex: none;
-  border-radius: 50%; background: var(--ph); color: #fff; overflow: hidden; }
-#dyce-app .exp-item .exp-av i { position: absolute; inset: 0; font-style: normal;
-  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; }
-#dyce-app .exp-item .exp-av img { position: absolute; inset: 0; width: 100%; height: 100%;
-  object-fit: cover; }
+#dyce-app .rd-head .msg-tool.on svg { transform: rotate(180deg); }
+#dyce-app .rd-stats { position: absolute; top: 38px; right: 0; z-index: 50; width: 182px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 5px; }
+#dyce-app .rd-stats[hidden] { display: none; }
+#dyce-app .rd-stats .rs { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; padding: 7px 8px; }
+#dyce-app .rd-stats .rs > span { font-size: 12.5px; color: var(--muted); }
+#dyce-app .rd-stats .rs .v { white-space: nowrap; }
+#dyce-app .rd-stats .rs b { font-size: 15.5px; font-weight: 700; color: var(--text); }
+#dyce-app .rd-stats .rs em { font-size: 11.5px; font-style: normal; color: var(--muted2);
+  margin-left: 2px; }
+/* 右键媒体 → 单独保存：同一套圆角卡片壳，只一项动作 */
+#dyce-app .rd-ctx { position: fixed; z-index: 62; min-width: 150px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 12px; padding: 5px;
+  box-shadow: var(--shadow), 0 16px 44px rgba(0, 0, 0, .20); }
+#dyce-app .rd-ctx[hidden] { display: none; }
+#dyce-app .rd-ctx .ci { padding: 8px 10px; border-radius: 8px; font-size: 13px; cursor: pointer;
+  color: var(--text); white-space: nowrap; }
+#dyce-app .rd-ctx .ci:hover { background: var(--accent-soft); color: var(--accent); }
+#dyce-app .rd-ctx .ci.danger { color: #dc2626; }
+#dyce-app .rd-ctx .ci.danger:hover { background: #fdecec; color: #b91c1c; }
+#dyce-app .dlg-foot .big.danger { color: #dc2626; border-color: #f3b4b4; }
+#dyce-app .dlg-foot .big.danger:hover { border-color: #dc2626; color: #b91c1c; }
 /* ── 阅读器 ── */
 #dyce-app #pane3 { position: absolute; inset: 0; z-index: 6; display: none;
   grid-template-columns: 260px minmax(0, 1fr); gap: 8px; min-height: 0; }
@@ -1897,9 +1994,9 @@
 #dyce-app .rd-side { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
   box-shadow: var(--shadow);
   display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-#dyce-app .rd-head { padding: 14px 14px 10px; font-size: 15px; font-weight: 700;
+#dyce-app .rd-head { padding: 13px 14px 11px; font-size: 15px; font-weight: 700;
   border-bottom: 1px solid var(--line); display: flex; justify-content: space-between;
-  align-items: baseline; }
+  align-items: center; gap: 8px; }
 #dyce-app .rd-list { flex: 1; overflow-y: auto; min-height: 0; padding: 6px; }
 #dyce-app .rd-item { display: flex; align-items: center; gap: 10px;
   padding: 9px 10px; border-radius: 9px; cursor: pointer; margin-bottom: 2px; }
@@ -1914,21 +2011,27 @@
   align-items: baseline; gap: 1px; min-width: 0; }
 #dyce-app .rd-item .n .nn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0; }
-#dyce-app .rd-item .n .nc { flex: none; font-weight: 400; font-size: 12px; color: var(--muted); }
-#dyce-app .rd-item .s { font-size: 11.5px; color: var(--muted); }
+/* 第二行：条数 · 占用大小 */
+#dyce-app .rd-item .s { font-size: 11.5px; color: var(--muted2); }
+/* 置顶的那条直接压深背景，一眼看得出谁被钉住了；正选中的那条仍以选中色为准 */
+#dyce-app .rd-item.pin { background: var(--chipbg); }
+#dyce-app .rd-item.pin.on { background: var(--accent-soft); }
+#dyce-app .rd-item.pin .n { font-weight: 700; }
 #dyce-app .rd-main { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
   box-shadow: var(--shadow);
   display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 #dyce-app .rd-toolbar { display: flex; gap: 10px; align-items: center; padding: 12px 16px;
   border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 #dyce-app .rd-toolbar .rd-title { font-weight: 700; font-size: 15px; margin-right: auto; }
-/* 「媒体还没下载」提示条：名字后面、搜索框前面，只在真有缺失时出现 */
-#dyce-app .medgap { display: inline-flex; align-items: center; gap: 8px; max-width: 46%;
-  font-size: 12.5px; color: var(--muted); background: var(--chipbg);
-  border-radius: 9px; padding: 4px 5px 4px 10px; }
+/* 「媒体还没下载」：名字后面、搜索框前面只留一颗红按钮，明细放鼠标悬停提示 */
+#dyce-app .medgap { border: none; background: #dc2626; color: #fff; font-weight: 600;
+  font-size: 12.5px; border-radius: 9px; padding: 5px 12px; cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .18); }
+#dyce-app .medgap:hover { background: #b91c1c; color: #fff; }
+/* 一条都补不了（链接全过期）时不装作还能点：换成灰色，点了只说明原因 */
+#dyce-app .medgap.dead { background: var(--chipbg); color: var(--muted); box-shadow: none; }
+#dyce-app .medgap.dead:hover { background: var(--chipbg); color: var(--muted); }
 #dyce-app .medgap[hidden] { display: none; }
-#dyce-app .medgap .mg-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#dyce-app .medgap .pill { padding: 4px 11px; font-size: 12.5px; }
 #dyce-app .rd-toolbar .text { width: auto; flex: 0 1 220px; }
 #dyce-app .rd-body { flex: 1; overflow-y: auto; min-height: 0; padding: 16px 18px 40px;
   background: var(--bg2); }
@@ -1980,6 +2083,9 @@
 #dyce-app .bub .imgph, #dyce-app .bub img.rimg { max-width: 240px; border-radius: 10px; display: block; }
 #dyce-app .bub .imgph { min-width: 160px; min-height: 90px; background: var(--chipbg); color: var(--muted2);
   font-size: 12px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+/* 分享卡片的封面占位：只占位不出形——它是「可有可无」的东西，
+   没加载出来时不该留下灰块、边框或「加载中」字样（占位还留着 = 出问题了，直接删） */
+#dyce-app .bub .imgph.covph { background: none; color: transparent; border: 0; cursor: default; }
 #dyce-app .bub img.emo { width: 96px; height: 96px; object-fit: contain; }
 /* 图片解不出来时的灰字占位（不留浏览器的破图标和空框） */
 #dyce-app .bub .badmedia { font-size: 12.5px; color: var(--muted2); }
@@ -2075,10 +2181,11 @@
   padding: 10px; }
 #dyce-app .voice-card audio { width: 100%; }
 #dyce-app .voice-card .vc-time { font-size: 11.5px; color: var(--muted); }
-/* 会话详情（右侧滑出） */
-#dyce-app .conv-side-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 300px;
-  z-index: 8; background: var(--card); border-left: 1px solid var(--line);
-  box-shadow: var(--shadow); display: flex; flex-direction: column; }
+/* 会话详情（右侧滑出）：浮在阅读器上的一枚圆角卡片，和弹层 / 设置同一套壳 */
+#dyce-app .conv-side-panel { position: absolute; top: 12px; right: 12px; bottom: 12px; width: 300px;
+  z-index: 8; background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow), 0 16px 44px rgba(0, 0, 0, .20);
+  display: flex; flex-direction: column; overflow: hidden; }
 #dyce-app .conv-side-panel[hidden] { display: none; }
 #dyce-app .csp-head { display: flex; justify-content: space-between; align-items: center;
   padding: 12px 14px; border-bottom: 1px solid var(--line); font-weight: 700; font-size: 14px; }
@@ -2101,6 +2208,13 @@
   z-index: 60; padding: 9px 16px; border-radius: 10px; background: #fef3c7;
   border: 1px solid #f5d98a; color: #7a5a00; font-size: 13px; font-weight: 600;
   box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 70%; }
+/* 自绘悬浮提示：替掉浏览器原生气泡（灰底方框、跟界面不搭）。
+   底色走 --card，浅色=纯白、深色=卡片深灰，圆角与卡片一致。 */
+#dyce-app .dytip { position: fixed; z-index: 90; pointer-events: none; max-width: 300px;
+  background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(16,24,40,.08), 0 10px 26px rgba(16,24,40,.12);
+  padding: 7px 11px; font-size: 12.5px; font-weight: 500; line-height: 1.5; letter-spacing: .2px;
+  white-space: pre-line; text-align: left; }
 #dyce-app .modal { position: fixed; inset: 0; z-index: 40; background: var(--overlay);
   display: flex; align-items: center; justify-content: center; }
 #dyce-app .modal[hidden] { display: none; }
@@ -2145,6 +2259,19 @@
   min-height: 19px; }
 #dyce-app .pm-note { font-size: 12px; color: var(--muted2); margin-top: 12px; line-height: 1.6; }
 #dyce-app .pm-foot { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
+/* ── 带按钮的对话框（和进度弹窗同一套壳，只是没有进度条）── */
+#dyce-app #dyce-dlg { position: fixed; inset: 0; z-index: 58; display: none;
+  align-items: center; justify-content: center;
+  background: var(--overlay); -webkit-backdrop-filter: blur(9px) saturate(1.05);
+  backdrop-filter: blur(9px) saturate(1.05); }
+#dyce-app #dyce-dlg.show { display: flex; }
+#dyce-app .dlg-card { width: min(460px, 92vw); background: var(--card); border: 1px solid var(--line);
+  border-radius: 16px; box-shadow: 0 18px 60px rgba(0,0,0,.28); padding: 22px 24px 18px; }
+#dyce-app .dlg-t { font-size: 16px; font-weight: 700; }
+#dyce-app .dlg-b { margin-top: 9px; font-size: 13.5px; line-height: 1.75; color: var(--muted);
+  white-space: pre-line; }
+#dyce-app .dlg-foot { margin-top: 18px; display: flex; justify-content: flex-end; gap: 9px; }
+#dyce-app .dlg-foot .big { padding: 8px 16px; font-size: 13.5px; }
 /* ── 步骤未完成的置灰态：仍可点击（点击给出下一步提示），不再是死禁用 ── */
 #dyce-app .lockui { opacity: .45; cursor: not-allowed; }
 #dyce-app .lockui:hover { border-color: var(--line); }
@@ -2155,12 +2282,14 @@
 #dyce-app .sortbtn.on { color: var(--accent); border-color: var(--accent); }
 #dyce-app .gal-card img { cursor: zoom-in; }
 /* ── 语音转文字弹层的行 ── */
-#dyce-app .asr-row { display: flex; gap: 11px; align-items: flex-start; padding: 10px 12px;
-  border: 1px solid var(--line); border-radius: 11px; background: var(--bg); margin-bottom: 8px; }
+/* 勾选框和卡片一样落在每行的右上角（.gal-pick 是绝对定位，行不设 relative
+   就会飘到整个弹层的右上角，看着像多了个莫名其妙的方框） */
+#dyce-app .asr-row { position: relative; display: flex; gap: 11px; align-items: flex-start;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--bg);
+  margin-bottom: 8px; }
 #dyce-app .asr-row:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
-#dyce-app .asr-row input[type=checkbox] { width: 16px; height: 16px; margin-top: 3px; flex: none;
-  accent-color: var(--accent); }
-#dyce-app .asr-main { flex: 1; min-width: 0; }
+#dyce-app .asr-row .gal-pick { right: 8px; top: 8px; }
+#dyce-app .asr-main { flex: 1; min-width: 0; padding-right: 18px; }
 #dyce-app .asr-meta { font-size: 12px; color: var(--muted); }
 #dyce-app .asr-state { font-size: 12px; font-weight: 600; color: var(--muted2); margin-top: 3px; }
 #dyce-app .asr-state.ok { color: var(--ok-tx); }
@@ -2172,7 +2301,6 @@
 
   var ICON = {
     step1: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h12M4 10h12M4 14h8"/></svg>',
-    step2: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="3.5" width="5.5" height="5.5" rx="1.2"/><rect x="11" y="3.5" width="5.5" height="5.5" rx="1.2"/><rect x="3.5" y="11" width="5.5" height="5.5" rx="1.2"/><rect x="11" y="11" width="5.5" height="5.5" rx="1.2"/></svg>',
     chats: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M3.5 4.5h13v9H9l-3.5 3v-3H3.5z"/></svg>',
     ai: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M9 3.4l1.5 3.9 3.9 1.5-3.9 1.5L9 14.2l-1.5-3.9-3.9-1.5 3.9-1.5z"/><path d="M15.6 3v2.6M14.3 4.3h2.6"/></svg>',
     web: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="10" cy="10" r="6.2"/><path d="M3.8 10h12.4M10 3.8c2.4 2.6 2.4 9.8 0 12.4M10 3.8c-2.4 2.6-2.4 9.8 0 12.4"/></svg>',
@@ -2185,26 +2313,23 @@
     if (n == null) return '';
     if (n < 1024) return n + ' B';
     if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
-    return (n / 1048576).toFixed(1) + ' MB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';      // 全下完的媒体很容易上 GB
   }
 
   /* ---- 步骤切换 ---- */
   function showStep(which) {
     curStep = which;
     $('#tab1').classList.toggle('active', which === '1');
-    $('#tab2').classList.toggle('active', which === '2');
     $('#railChats').classList.toggle('active', which === 'reader');
     $('#railAi').classList.toggle('active', which === 'ai');
     var isReader = which === 'reader';
     var isAi = which === 'ai';
     var left = $('#dyce-left'), right = $('#dyce-right');
-    // 步骤1 双栏；步骤2 概览隐藏左侧会话列表、右栏占满；阅读器与 AI 页都铺满整块区域
+    // 步骤1 是「会话列表 + 导出设置」双栏；阅读器与 AI 页铺满整块区域
     if (left) left.style.display = which === '1' ? '' : 'none';
-    if (right) right.style.display = (isReader || isAi) ? 'none' : '';
-    var cols = $('#dyce-cols');
-    if (cols) cols.classList.toggle('solo', which === '2');
+    if (right) right.style.display = which === '1' ? '' : 'none';
     $('#pane1').hidden = which !== '1';
-    $('#pane2').hidden = which !== '2';
     var p4 = $('#pane4');
     if (p4) { p4.hidden = !isAi; p4.classList.toggle('show', isAi); }
     var p3 = $('#pane3');
@@ -2218,8 +2343,8 @@
       var eo2 = $('#rdEmojiOverlay'); if (eo2) eo2.hidden = true;
       var de = $('#rdDetails'); if (de) de.hidden = true;
       var ca = $('#rdCal'); if (ca) ca.hidden = true;
+      statsClose(); ctxClose();
     }
-    if (which === '2') updateOverview();
   }
   var curStep = '1';
 
@@ -2281,39 +2406,32 @@
     btn.textContent = label;
     updateStepChecks();
   }
-  function convAvatarBySafe(safe) {
-    var out = '';
-    state.conversations.some(function (c) {
-      if (safeName(c.name) === safe) { out = c.avatar || ''; return true; }
-      return false;
-    });
-    return out;
+  /* ---- 侧栏「数据概览」下拉：概览页删掉后只留这三项统计 ---- */
+  function statsClose() {
+    var p = $('#rdStats'), b = $('#rdStatsBtn');
+    if (p) p.hidden = true;
+    if (b) b.classList.remove('on');
+    tipHide();                      // 悬浮提示会压在弹层上，收起时一起收
   }
-  function updateRecentUI() {
-    var el = $('#exportDetails');
-    updateStepChecks();
-    if (!el) return;
-    if (!state.recentExports.length) { el.innerHTML = '<div class="hint">暂无导出记录</div>'; return; }
-    el.innerHTML = state.recentExports.map(function (x) {
-      // 头像按落盘名回查会话；查不到或图挂了就用首字母圆（img 叠在字母上，失败时删掉即露出）
-      var av = convAvatarBySafe(x.conv);
-      var ini = escHtml(String(x.conv || '?').slice(0, 1));
-      return '<div class="exp-item"><span class="exp-l">' +
-        '<span class="exp-av"><i>' + ini + '</i>' +
-        (av ? '<img loading="lazy" src="' + escHtml(av) + '" onerror="this.remove()">' : '') +
-        '</span><span>' + escHtml(x.name) + '</span></span>' +
-        '<span class="muted">' + fmtSize(x.size) + ' · ' +
-        new Date(x.at).toLocaleTimeString() + '</span></div>';
-    }).join('');
+  function statsToggle() {
+    var p = $('#rdStats');
+    if (!p) return;
+    if (!p.hidden) { statsClose(); return; }
+    updateStats();
+    p.hidden = false;
+    $('#rdStatsBtn').classList.add('on');
   }
-  function updateOverview() {
+  function updateStats() {
     if (!$('#stConv')) return;
     var memMsg = 0; state.msgByConv.forEach(function (m) { memMsg += m.size; });
     var memMedia = Object.keys(state.mediaPaths).length;
-    $('#stConv').textContent = state.conversations.length;
+    // 「已下载会话」= 本机真留有记录的会话数，不是抖音好友列表的总数（99 个会话里
+    // 只有 8 个导出过，写 99 会让人以为都下完了）。内存里取到的 + exports/ 里有快照的，按落盘名并集。
+    var names = {};
+    state.msgByConv.forEach(function (m, id) { names[safeName(convNameOf(id))] = 1; });
+    $('#stConv').textContent = Object.keys(names).length;
     $('#stMsg').textContent = memMsg;
     $('#stMedia').textContent = memMedia;
-    updateRecentUI();
     // 再按本机磁盘上的导出数据修正：重启后内存是空的，只统计本次会话会一直显示 0，
     // 而 exports/ 里其实躺着几千条消息。取「内存 / 磁盘」每个会话的较大值，不会倒退。
     var api = window.pywebview && window.pywebview.api;
@@ -2330,9 +2448,13 @@
         });
         Object.keys(r.perConv).forEach(function (k) {
           if (!seen[k]) msgs += r.perConv[k].total || 0;
+          names[k] = 1;                      // 磁盘上有快照 = 这个会话已经下载过
         });
+        $('#stConv').textContent = Object.keys(names).length;
         $('#stMsg').textContent = msgs;
         $('#stMedia').textContent = Math.max(memMedia, r.media || 0);
+        // 占用空间只有磁盘一个来源（内存里没有「文件多大」这件事），所以没取到就保持 —
+        $('#stBytes').textContent = (r.bytes || r.bytes === 0) ? fmtSize(r.bytes) : '—';
       }).catch(function () {});
     } catch (e) {}
   }
@@ -2415,15 +2537,6 @@
       img.onerror = function () { img.hidden = true; if (ph) ph.hidden = false; };
     }
     if (ph) ph.textContent = nick.slice(0, 1);
-    var oimg = $('#ovAvatar'), ofb = $('#ovFallback');
-    if (oimg) {
-      if (av) {
-        oimg.src = av; oimg.style.display = ''; if (ofb) ofb.style.display = 'none';
-        oimg.onerror = function () { oimg.style.display = 'none'; if (ofb) ofb.style.display = ''; };
-      }
-    }
-    if ($('#ovName')) $('#ovName').textContent = nick;
-    if ($('#ovSub')) $('#ovSub').textContent = state.myUid ? ('UID ' + state.myUid) : '';
   }
 
   async function refreshConversations() {
@@ -2439,7 +2552,7 @@
     if (st) st.textContent = '私聊 ' + pc + ' · 群聊 ' + gc +
       (state.myUid ? ' · 账号 ' + state.myUid : ' · 未登录');
     updateSelText();
-    updateOverview();
+    updateStats();
     log('会话列表已刷新');
   }
   function useCurrent() {
@@ -2497,7 +2610,7 @@
     btn.classList.remove('running');
     pmBar(total > 0 || skipped ? 100 : 0);
     updateSelText();
-    updateOverview();
+    updateStats();
     renderConvList();
     var detail = state.msgByConv.size ? Array.from(state.msgByConv.entries()).map(function (e) {
       return convNameOf(e[0]) + ' ' + e[1].size + ' 条';
@@ -2623,7 +2736,7 @@
     state.msgByConv.forEach(function (m, id) {
       var c = state.conversations.find(function (x) { return x.id === id; });
       items.push({ key: 'mem:' + id, name: convNameOf(id), count: m.size,
-        sub: '已获取', avatar: avatarOf(c) });
+        bytes: null, avatar: avatarOf(c) });
     });
     try {
       var api = readerApi();
@@ -2633,7 +2746,7 @@
           // 按落盘名比对：显示名带 emoji / 结尾点号时 safeName 后才是目录名，否则会重复列出
           var dup = items.filter(function (x) { return safeName(x.name) === c.name; })[0];
           if (dup) {
-            dup.sub = '已获取 · 已导出';
+            dup.bytes = c.size;
             if (dup.count == null && c.total != null) dup.count = c.total;
             return;
           }
@@ -2641,10 +2754,21 @@
             return safeName(x.name) === c.name;
           });
           items.push({ key: 'disk:' + c.name, name: c.name, count: c.total,
-            sub: '已导出 ' + fmtSize(c.size), avatar: avatarOf(cc) });
+            bytes: c.size, avatar: avatarOf(cc) });
         });
       }
     } catch (e) {}
+    // 置顶的排在最前（按置顶先后），其余顺序不变；名字取落盘名，和删除/内存清理同一口径
+    var pin = pinnedList();
+    if (pin.length) {
+      items.sort(function (a, b) {
+        var pa = pin.indexOf(safeName(a.name)), pb = pin.indexOf(safeName(b.name));
+        if (pa < 0 && pb < 0) return 0;
+        if (pa < 0) return 1;
+        if (pb < 0) return -1;
+        return pa - pb;
+      });
+    }
     var cnt = $('#rdSrcCnt');
     if (cnt) cnt.textContent = items.length ? items.length + ' 份' : '';
     // 正在看的那条记录没了（在抖音里删了会话 / 删了 exports）→ 右侧必须一起清空，
@@ -2660,12 +2784,16 @@
       var av = it.avatar
         ? '<div class="rdav" style="background-image:url(&quot;' + escHtml(it.avatar) + '&quot;)"></div>'
         : '<div class="rdav ph">' + escHtml(it.name.slice(0, 1)) + '</div>';
-      // 条数紧跟在名字后面用括号显示（原来单独占一行，看的人要先读「已获取」三个字）
-      var cc = it.count == null ? '' : '<span class="nc">（' + it.count + ' 条）</span>';
+      // 第一行只有名字；条数和占用大小放第二行小字，缺哪个就不显示哪个
+      var bits = [];
+      if (it.count != null) bits.push(it.count + ' 条');
+      if (it.bytes) bits.push(fmtSize(it.bytes));
+      var sz = bits.length ? '<div class="s">' + bits.join(' · ') + '</div>' : '';
       return '<div class="rd-item' + (state.reader.key === it.key ? ' on' : '') +
+        (isPinned(safeName(it.name)) ? ' pin' : '') +
         '" data-key="' + escHtml(it.key) + '">' + av +
         '<div class="rdinfo"><div class="n"><span class="nn">' + escHtml(it.name) +
-        '</span>' + cc + '</div><div class="s">' + escHtml(it.sub) + '</div></div></div>';
+        '</span></div>' + sz + '</div></div>';
     }).join('');
     $$('.rd-item', box).forEach(function (d) {
       d.addEventListener('click', function () { readerOpen(d.dataset.key); });
@@ -2849,12 +2977,14 @@
     }
     if (r.kind === 'sharevideo') {
       var sh = r.share || {};
-      // 封面是「可有可无」的：本地读不到、远程链过期，就把图整块去掉，只留介绍与链接
-      var cov = r.coverLocal
-        ? '<div class="imgph covph" data-mlazy data-mkind="img" data-mopt="1" data-mrel="' +
-          escHtml(r.coverLocal) + '" style="min-width:214px;min-height:120px">封面加载中…</div>'
-        : (sh.cover ? '<img loading="lazy" src="' + escHtml(sh.cover) +
-            '" onerror="this.remove()">' : '');
+      // 封面是「可有可无」的：不管本地还是远程，都先挂一个透明占位，
+      // 由 rdLoad 预加载解出图来才插 <img>——解不出就整块删掉，破图标和空框根本没机会进 DOM。
+      var covAttr = r.coverLocal ? ' data-mrel="' + escHtml(r.coverLocal) + '"'
+                                 : (sh.cover ? ' data-mrem="' + escHtml(sh.cover) + '"' : '');
+      var cov = (r.coverLocal || sh.cover)
+        ? '<div class="imgph covph" data-mlazy data-mkind="img" data-mopt="1"' + covAttr +
+          ' style="min-width:214px;min-height:120px"></div>'
+        : '';
       // 瘦身：封面限高 16:9、标题最多两行、不铺长链接（点「打开视频」跳转）
       // 跳转走 _self：target=_blank 会被 WebView2 丢给系统默认浏览器，用户要求在本软件内打开
       return '<div class="card svid">' + cov + '<div class="cb"><div class="ct">' +
@@ -2957,18 +3087,48 @@
     var m = /\.(heic|heif)$/i.exec(String(rel || ''));
     return m ? 'HEIC 未转码成功' : '';
   }
+  /* 可选媒体（分享卡片封面）的兜底：桥没回、回了不解码、解码不触发 onload/onerror
+     ——任何一种卡住，8 秒后整块删掉，绝不留个空框或破图标在气泡里。 */
+  function guardOptional(el, isImg) {
+    if (!el || el.getAttribute && el.getAttribute('data-mopt') !== '1') return;
+    setTimeout(function () {
+      if (!document.contains(el)) return;
+      if (isImg && el.complete && el.naturalWidth > 0) return;   // 真显示出来了就别动
+      el.remove();
+    }, 8000);
+  }
   function rdLoad(el) {
     var rel = el.getAttribute('data-mrel');
-    if (!rel) return;
+    var rem = el.getAttribute('data-mrem');    // 远程地址（分享封面）：不走桥，直接预加载
+    if (!rel && !rem) return;
+    guardOptional(el, false);
     var kind = el.getAttribute('data-mkind') || 'img';
-    loadMediaUrl(state.reader.title, rel).then(function (url) {
+    var got = rem ? Promise.resolve(rem) : loadMediaUrl(state.reader.title, rel);
+    got.then(function (url) {
       if (kind === 'audio') { el.src = url; return; }
       if (el.classList.contains('imgph')) {
+        // 可选媒体（分享卡片封面）：先在 DOM 外解一遍，解得出来才把 <img> 插进去。
+        // 浏览器只给「已挂在页面上的 img」画破图标和那圈边框——所以解不出来时
+        // 最坏也只是这块根本没有图，不会再出现空框。
+        if (el.getAttribute('data-mopt') === '1') {
+          var pre = new Image();
+          pre.onload = function () {
+            if (!document.contains(el)) return;
+            var ok = document.createElement('img');
+            ok.className = 'rimg'; ok.src = url;
+            ok.onerror = function () { ok.remove(); };
+            el.replaceWith(ok);
+          };
+          pre.onerror = function () { el.remove(); };
+          pre.src = url;
+          return;
+        }
         var im = document.createElement('img');
         im.className = 'rimg'; im.src = url;
         // 文件在、但字节不是浏览器能解的图（HEIC / 坏文件）：以前就留个破图标在这
         im.onerror = function () { mediaFail(im, badMediaHint(rel)); };
         el.replaceWith(im);
+        guardOptional(im, true);          // 换上去的这张图也要有兜底（blob 卡住不报错的情况）
       } else if (el.classList.contains('rav')) {
         var im2 = document.createElement('img');
         im2.src = url;
@@ -3067,31 +3227,57 @@
 
   /* ---- 「这条记录的媒体还没下载」：提示条 + 一键补下载 ----
      只勾 JSON 导出时，阅读器能列出这条记录，但图片/语音/视频都还没下载（点开是空的）。 */
+  /* 抖音媒体链接是一次性签名地址，x-expires（unix 秒）过了 CDN 直接 403。
+     过期 / 接口压根没给链接的两类都补不下来，只能回步骤1重新获取该会话数据。 */
+  function urlExpired(u) {
+    var m = /[?&]x-expires=(\d{9,11})(?:&|$)/.exec(String(u || ''));
+    return m ? Number(m[1]) * 1000 <= Date.now() : false;
+  }
+  function firstUrl(list) {
+    var x = (list && list[0]) || '';
+    return typeof x === 'string' ? x : ((x && x.url) || '');
+  }
+  /* 这一行的媒体现在还取不取得到 */
+  function rowMediaDead(r) {
+    var c = r.cj || {}, ru = c.resource_url || {}, u = '';
+    if (r.kind === 'image') u = ru.skey ? firstUrl(ru.origin_url_list) : '';
+    else if (r.kind === 'voice') u = firstUrl(ru.url_list);
+    else if (r.kind === 'video') return !(c.video && c.video.tkey && c.video.skey);
+    else if (r.kind === 'emoji') u = r.emojiUrl || '';
+    else return false;
+    return !u || urlExpired(u);
+  }
   function missingMediaCounts(rows) {
-    var n = { image: 0, video: 0, voice: 0, emoji: 0, total: 0 };
+    var n = { image: 0, video: 0, voice: 0, emoji: 0, total: 0, dead: 0, live: 0, have: 0 };
     (rows || []).forEach(function (r) {
-      if (r.kind === 'image' && !r.local) n.image++;
-      else if (r.kind === 'video' && !r.local) n.video++;
-      else if (r.kind === 'voice' && !r.local) n.voice++;
-      else if (r.kind === 'emoji' && !r.local && r.emojiUrl) n.emoji++;
+      if (n[r.kind] === undefined) return;               // 只算图片 / 视频 / 语音 / 表情四类
+      if (r.kind === 'emoji' && !r.emojiUrl) return;     // 连远程地址都没有的表情：不算缺
+      if (r.local) { n.have++; return; }                 // 这条记录的媒体其实下过
+      n[r.kind]++; n.total++;
+      if (rowMediaDead(r)) n.dead++; else n.live++;
     });
-    n.total = n.image + n.video + n.voice + n.emoji;
     return n;
   }
   function updateMediaGapBar() {
-    var bar = $('#rdMedGap'), txt = $('#rdMedGapTxt'), btn = $('#rdMedGapBtn');
-    if (!bar) return;
+    var btn = $('#rdMedGap');
+    if (!btn) return;
     var n = missingMediaCounts(state.reader.rows);
-    if (!n.total || state.reader.downloading || !state.reader.key) { bar.hidden = true; return; }
+    // 只在这种时候出现：① 还有能补下的（不管下没下过）；② 这条记录压根没下过媒体、
+    // 只剩过期死链（那才需要告诉他「得重新获取」）。已经下过媒体、只剩几条过期封面的，
+    // 不再拿一颗灰色「链接已过期」去每条记录上骚扰。
+    var show = !!n.total && !!state.reader.key && (n.live > 0 || !n.have);
+    if (!show || state.reader.downloading) { btn.hidden = true; return; }
     var parts = [];
     if (n.image) parts.push('图片 ' + n.image);
     if (n.video) parts.push('视频 ' + n.video);
     if (n.voice) parts.push('语音 ' + n.voice);
     if (n.emoji) parts.push('表情 ' + n.emoji);
-    txt.textContent = '媒体未下载 · ' + parts.join(' · ');
-    txt.title = '这条记录只存了文字，' + n.total + ' 个媒体文件还没下载';
-    if (btn) btn.textContent = '⬇ 下载 ' + n.total + ' 项';
-    bar.hidden = false;
+    btn.classList.toggle('dead', !n.live);
+    btn.textContent = n.live ? ('⬇ 下载 ' + n.live + ' 项') : '⬇ 链接已过期';
+    btn.title = '媒体未下载 · ' + parts.join(' · ') +
+      (n.dead ? '\n' + n.dead + ' 条的签名链接已过期（抖音给的是一次性地址，补不了）' : '') +
+      (n.live ? '\n点一下补齐这 ' + n.live + ' 条' : '\n点一下看怎么重新获取');
+    btn.hidden = false;
   }
   /* 当前记录对应的会话对象（内存视图按 id 找，磁盘视图按落盘名找） */
   function readerConvOf() {
@@ -3123,6 +3309,27 @@
     var r = await deliver('json', 'application/json;charset=utf-8', JSON.stringify(payload, null, 2), title);
     return !!(r && r.ok !== false);
   }
+  /* 跳到步骤1并把该会话勾上，让用户直接点「▶ 获取聊天数据」重取（会带回新的媒体地址） */
+  function gotoRefetch(cname) {
+    showStep('1');
+    var conv = state.conversations.find(function (c) {
+      return c.name === cname || safeName(c.name) === cname || safeName(c.name) === safeName(cname);
+    });
+    if (!conv) {
+      tip('会话列表里没找到「' + cname + '」（可能已删除或没刷新）：请重新获取会话列表后勾选它再取数据');
+      return;
+    }
+    if (state.selectedIds.indexOf(conv.id) < 0) state.selectedIds.push(conv.id);
+    renderConvList();
+    updateSelText();
+    var row = $$('#convList .conv').filter(function (d) { return d.dataset.id === conv.id; })[0];
+    if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+    // 本次已经翻完过的会话再点会被判「已就绪」而跳过 —— 那样链接不会刷新
+    tip(state.pullDone[conv.id]
+      ? '已勾选「' + conv.name + '」，但它本次已取完：先重启软件（或等下次开机）再点「▶ 获取聊天数据」，' +
+        '重新取一遍才会带回新的媒体地址'
+      : '已勾选「' + conv.name + '」：点「▶ 获取聊天数据」重新取一次，完成后点「⬆ 导出」并勾上媒体');
+  }
   async function downloadMissingMedia() {
     var R = state.reader;
     if (R.downloading) return;
@@ -3132,25 +3339,44 @@
     var conv = readerConvOf(), cname = conv.name || R.title;
     if (!cname) { showToast('先选一条记录'); return; }
     var msgs = (R.rows || []).filter(function (r) { return r.cj && r.server_id; });
-    var tasks = mediaTasksFor(cname, msgs, ALL_MEDIA).filter(function (t) {
-      if (t.kind === 'share_meta') return !state.mediaPaths[t.sid];
-      return !state.mediaPaths[t.sid];
+    var mn = missingMediaCounts(R.rows);
+    // 只补「这条记录里确实还没落盘的那几行」：以前只按内存里的 mediaPaths 过滤，
+    // 从磁盘打开的记录 mediaPaths 是空的，于是一点就把整条记录几百个媒体全排队，
+    // 弹窗写着 49 项、按钮写着 6 项，还把早已下好的再下一遍。
+    var want = {};
+    (R.rows || []).forEach(function (r) {
+      if (r.server_id && !r.local && ['image', 'video', 'voice', 'emoji'].indexOf(r.kind) >= 0) {
+        want[r.server_id] = 1;
+      }
     });
+    // 一行一个文件：分享视频封面、视频海报不在补下载范围内（它们只在导出那一步落盘），
+    // 否则「按钮 N 项 / 实跑 M 个」又会变成两个数
+    var all = mediaTasksFor(cname, msgs, ALL_MEDIA).filter(function (t) {
+      return !/_(cover|meta)$/.test(t.sid) && want[t.sid];
+    });
+    var tasks = all.filter(function (t) { return !(t.url && urlExpired(t.url)); });
+    var skippedDead = all.length - tasks.length;
     if (!tasks.length) {
-      showToast('没有可下载的媒体（消息太旧，链接已失效，需重新获取数据）');
+      dlShow('这些媒体的链接已经过期',
+        '抖音给的媒体地址是一次性签名链接，过期后服务器直接拒绝（403）。' +
+        '这份快照里缺的 ' + (all.length || mn.total) + ' 条现在已经取不回来了。\n' +
+        '要补全得回步骤1重新获取这个会话的聊天数据（接口会带回新地址），完成后再点「⬆ 导出」并勾上媒体。',
+        [{ label: '知道了' },
+         { label: '去重新获取数据', primary: true, fn: function () { gotoRefetch(cname); } }]);
       return;
     }
     R.downloading = true; updateMediaGapBar();
     progOpen('正在下载「' + cname + '」的媒体', {
-      sub: tasks.length + ' 项（图片 / 视频 / 语音 / 表情）',
+      sub: tasks.length + ' 个文件' +
+        (skippedDead ? ' · 另有 ' + skippedDead + ' 条链接已过期，跳过' : ''),
       note: '完成后会自动关闭，并写回这条记录的 JSON。'
     });
-    var done = 0, fail = 0, n = tasks.length;
+    var done = 0, fail = 0, n = tasks.length, errs = {};
     try { await resolveBatch(tasks); }
     catch (e) { log('媒体地址解析失败：' + e.message); }
     await runPool(tasks, async function (it) {
       var ret = null;
-      try { ret = await api.download_one(cname, it); } catch (e) {}
+      try { ret = await api.download_one(cname, it); } catch (e) { ret = { error: e.message }; }
       if (ret && ret.ok) {
         done++;
         state.mediaPaths[it.sid] = ret.rel;
@@ -3160,7 +3386,12 @@
           if (/(_cover)$/.test(it.sid)) r.coverLocal = ret.rel;
           else if (!/(_meta)$/.test(it.sid)) r.local = ret.rel;
         });
-      } else fail++;
+      } else {
+        // 失败原因以前整个丢掉，界面只剩「失败 49」，谁也说不清是过期还是没地址
+        fail++;
+        var why = String((ret && ret.error) || '调用没返回结果');
+        errs[why] = (errs[why] || 0) + 1;
+      }
       mediaProgSet('下载媒体 ' + (done + fail) + '/' + n + '…');
       pmBar(Math.min(92, Math.round((done + fail) / n * 92)));
     }, 6);
@@ -3170,9 +3401,20 @@
     try { saved = await writeBackLocalFields(safeName(cname)); } catch (e) { log('写回记录失败：' + e.message); }
     R.downloading = false;
     pmBar(100);
-    progFinish('✓ 已下载 ' + done + ' 项' + (fail ? '（失败 ' + fail + '）' : '') +
-      (saved ? '，已写回记录' : ''), 1600);
-    logSrv('阅读器补下载媒体「' + cname + '」成功' + done + ' 失败' + fail + ' 写回' + (saved ? 'ok' : 'no'));
+    // 失败原因按出现次数排序取第一条，过期这种最常见的直接翻成人话
+    var whyList = Object.keys(errs).map(function (k) { return [k, errs[k]]; })
+      .sort(function (a, b) { return b[1] - a[1]; });
+    var whyTxt = '';
+    if (whyList.length) {
+      var top = whyList[0][0];
+      if (/403|expired|error page|too small/i.test(top)) top = '链接已过期';
+      whyTxt = '：' + top.slice(0, 40) + (whyList.length > 1 ? '（另有 ' + (whyList.length - 1) + ' 种原因）' : '');
+    }
+    progFinish('✓ 已下载 ' + done + ' 个文件' + (fail ? '（失败 ' + fail + whyTxt + '）' : '') +
+      (saved ? '，已写回记录' : ''), fail ? 4200 : 1600);
+    logSrv('阅读器补下载媒体「' + cname + '」成功' + done + ' 失败' + fail +
+      (skippedDead ? ' 过期跳过' + skippedDead : '') + ' 写回' + (saved ? 'ok' : 'no') +
+      (whyList.length ? ' 原因：' + whyList.map(function (p) { return p[1] + '×' + p[0]; }).join(' | ') : ''));
     if (R.key) readerOpen(R.key);
   }
 
@@ -3250,6 +3492,21 @@
     }
     rcal.target = target;
     box.hidden = false;
+    // 弹层对准被点开的那一格：日期块现在紧跟分段按钮，再靠 CSS 的 right:0 会错位
+    var btn = $(target === 'start' ? '#dateStartBtn' : '#dateEndBtn');
+    var grp = box.parentNode;
+    if (btn && grp) {
+      var w = box.offsetWidth || 252, hh = box.offsetHeight || 266;
+      var br = btn.getBoundingClientRect(), gr = grp.getBoundingClientRect();
+      var x = (br.left - gr.left) + br.width / 2 - w / 2;
+      x = Math.max(0, Math.min(x, Math.max(0, gr.width - w)));
+      box.style.left = Math.round(x) + 'px';
+      box.style.right = 'auto';
+      // 纵向也按按钮算：贴到日期格下方 6px，行高变了也不会压住按钮；屏幕下方放不下就朝上开
+      var y = (br.bottom - gr.top) + 6;
+      if (br.bottom + 6 + hh > window.innerHeight) y = (br.top - gr.top) - hh - 6;
+      box.style.top = Math.round(y) + 'px';
+    }
     rangeCalRender();
     syncDateFields();
   }
@@ -3574,12 +3831,6 @@
     if (et) return false;
     return Number(r.aweType) === 501;
   }
-  function emojiKey(r) {
-    // 同一个表情发多次是常态：合集按「表情资源本身」去重。
-    // 优先用远程地址（去掉 ? 后面的临时签名参数），没有才退回本地文件名。
-    var u = String(r.emojiUrl || '').split('?')[0];
-    return u || String(r.local || '');
-  }
   function readerEmojiItems() {
     var rows = state.reader.rows || [];
     var official = [], user = [], ieSeen = {}, emSeen = { official: {}, user: {} };
@@ -3835,6 +4086,121 @@
     if (state.conversations.length) done();
     else refreshConversations().then(done).catch(done);
   }
+  /* ---- 右键菜单（阅读器的媒体「另存为」、左侧列表的「置顶 / 删除」共用一套）----
+     浏览器的「图片另存为」对我们没用：图是桥分块读出来再转 blob 的，存下来是个随机名。 */
+  var ctxActions = [];
+  function ctxClose() {
+    var m = $('#rdCtx');
+    if (m) m.hidden = true;
+    ctxActions = [];
+  }
+  function ctxMediaOf(el) {
+    var row = el && el.closest ? el.closest('.mrow') : null;
+    if (!row) return null;
+    var r = (state.reader.filtered || [])[Number(row.dataset.i)];
+    if (!r) return null;
+    var map = { image: ['保存图片', r.local], video: ['保存视频', r.local],
+      voice: ['保存语音', r.local], emoji: ['保存表情', r.local],
+      sharevideo: ['保存封面', r.coverLocal] };
+    var hit = map[r.kind];
+    return hit && hit[1] ? { label: hit[0], rel: hit[1] } : null;
+  }
+  /* actions: [{ label, danger?, fn }] —— 内容用 createElement 填，不拼 HTML */
+  function ctxOpen(e, actions) {
+    var menu = $('#rdCtx');
+    if (!menu) return;
+    ctxActions = (actions || []).filter(function (a) { return a && a.label; });
+    if (!ctxActions.length) return;
+    menu.innerHTML = '';
+    ctxActions.forEach(function (a) {
+      var d = document.createElement('div');
+      d.className = 'ci' + (a.danger ? ' danger' : '');
+      d.textContent = a.label;
+      menu.appendChild(d);
+    });
+    menu.hidden = false;
+    // 贴着光标展开，右侧 / 下方放不下就往回收，别探出窗口
+    var w = menu.offsetWidth, h = menu.offsetHeight;
+    menu.style.left = Math.max(6, Math.min(e.clientX, window.innerWidth - w - 8)) + 'px';
+    menu.style.top = Math.max(6, Math.min(e.clientY, window.innerHeight - h - 8)) + 'px';
+  }
+  async function ctxSaveMedia(t) {
+    var api = readerApi();
+    if (!api || !api.save_media_as) { showToast('需在软件内运行'); return; }
+    var r = null;
+    try {
+      r = await api.save_media_as(state.reader.title, t.rel);
+    } catch (e) { r = { error: String((e && e.message) || e) }; }
+    if (r && r.ok) { showToast('已保存到 ' + r.path); log('单独保存：' + t.rel + ' → ' + r.path); }
+    else if (r && !r.cancelled) showToast('保存失败：' + (r.error || '未知错误'));
+  }
+  /* ---- 左侧列表：置顶（本机记住）与删除整个会话文件夹 ---- */
+  function pinnedList() {
+    try { return JSON.parse(localStorage.getItem('dyce_pinned') || '[]') || []; } catch (e) { return []; }
+  }
+  function isPinned(safe) { return pinnedList().indexOf(safe) >= 0; }
+  function togglePin(safe) {
+    var l = pinnedList(), i = l.indexOf(safe);
+    if (i >= 0) l.splice(i, 1); else l.unshift(safe);
+    try { localStorage.setItem('dyce_pinned', JSON.stringify(l.slice(0, 50))); } catch (e) {}
+    readerRefreshSide();
+    showToast(i >= 0 ? '已取消置顶' : '已置顶');
+  }
+  /* 删掉文件夹后，内存里那份本次取的数据也要一起丢，否则列表还会把它当「已获取」列出来 */
+  function dropConvFromMemory(safe) {
+    var ids = [];
+    state.conversations.forEach(function (c) { if (safeName(c.name) === safe) ids.push(c.id); });
+    state.msgByConv.forEach(function (m, id) { if (safeName(convNameOf(id)) === safe) ids.push(id); });
+    ids.forEach(function (id) {
+      var byId = state.msgByConv.get(id);
+      if (byId) byId.forEach(function (m, sid) {
+        delete state.mediaPaths[sid]; delete state.mediaPaths[sid + '_cover'];
+        delete state.asrText[sid];
+      });
+      state.msgByConv.delete(id);
+      delete state.pullDone[id];
+    });
+    Object.keys(state.avatarPathsOwner).forEach(function (sec) {
+      if (safeName(state.avatarPathsOwner[sec]) === safe) {
+        delete state.avatarPathsOwner[sec]; delete state.avatarPaths[sec];
+      }
+    });
+    var pin = pinnedList(), pi = pin.indexOf(safe);
+    if (pi >= 0) { pin.splice(pi, 1); try { localStorage.setItem('dyce_pinned', JSON.stringify(pin)); } catch (e) {} }
+  }
+  function sideDelete(key) {
+    var safe = key.indexOf('mem:') === 0 ? safeName(convNameOf(key.slice(4))) : key.slice(5);
+    var shown = key.indexOf('mem:') === 0 ? convNameOf(key.slice(4)) : safe;
+    if (!safe) return;
+    dlShow('删除「' + shown + '」的本机记录',
+      '会把 exports\\' + safe + ' 整个文件夹删掉：聊天记录、图片 / 视频 / 语音 / 表情，' +
+      '以及导出的 JSON / HTML / TXT / CSV 全在里面，删掉不可恢复。',
+      [{ label: '取消' }, { label: '删除', danger: true, fn: function () { doSideDelete(safe, shown); } }]);
+  }
+  async function doSideDelete(safe, shown) {
+    var api = readerApi();
+    var r = { ok: false, error: '需在软件内运行' };
+    if (api && api.delete_export_conv) {
+      try { r = await api.delete_export_conv(safe) || r; }
+      catch (e) { r = { ok: false, error: String((e && e.message) || e) }; }
+    }
+    dropConvFromMemory(safe);
+    if (state.reader.key && (state.reader.key === 'disk:' + safe ||
+        (state.reader.key.indexOf('mem:') === 0 && safeName(convNameOf(state.reader.key.slice(4))) === safe))) {
+      readerResetView();
+    }
+    await readerRefreshSide();
+    if (r.ok) showToast('已删除「' + shown + '」，释放 ' + (fmtSize(r.bytes || 0) || '0 B'));
+    else showToast('删除失败：' + (r.error || '未知错误'));
+  }
+  function sideActions(key) {
+    var safe = key.indexOf('mem:') === 0 ? safeName(convNameOf(key.slice(4))) : key.slice(5);
+    if (!safe) return [];
+    return [
+      { label: isPinned(safe) ? '取消置顶' : '置顶', fn: function () { togglePin(safe); } },
+      { label: '删除本机记录', danger: true, fn: function () { sideDelete(key); } }
+    ];
+  }
   /* 点卡片里的链接（软件内跳转）前记下当前位置 */
   function noteNavIntentFrom(el) {
     var row = el.closest ? el.closest('.mrow') : null;
@@ -3879,14 +4245,6 @@
           : 'API Key（留空＝不修改）';
       }
       set('#setModel', c.model || 'mimo-v2.5-asr');
-      var stat = $('#setModelStat');
-      if (stat) {
-        stat.textContent = (c.configured ? '已配置：' : '未配置：') + (c.model || '') +
-          ' @ ' + (c.base_url || '(无 Base URL)') +
-          (c.has_key ? ' · Key ' + (c.api_key_mask || '已保存') +
-            (c.key_protected ? '（DPAPI 加密）' : '（DPAPI 不可用，暂存明文）')
-            : ' · 还没有 Key');
-      }
     } catch (e) {}
   }
   function initAsr() {
@@ -3950,11 +4308,10 @@
     app.innerHTML = [
       '<div class="shell">',
         '<aside class="rail">',
-          '<div class="me" id="railMe" title="回到抖音网页（点击）"><img id="railMeImg" hidden>',
+          '<div class="me" id="railMe" title="回到抖音网页"><img id="railMeImg" hidden>',
             '<span class="fallback" id="railMePh">我</span><span class="dot"></span></div>',
           '<nav class="railsteps">',
             '<button class="step active" id="tab1" title="选会话 —— 勾选要导出的人，并设置导出参数">', ICON.step1, '</button>',
-            '<button class="step" id="tab2" title="概览 —— 查看进度与导出结果">', ICON.step2, '</button>',
             '<button class="step" id="railChats" title="聊天记录 —— 在应用里直接阅读">', ICON.chats, '</button>',
             '<button class="step" id="railAi" title="AI 分析 —— 开发中">', ICON.ai, '</button>',
           '</nav>',
@@ -4032,40 +4389,32 @@
                 '<div id="dyce-busy"></div>',
               '</div>',
             '</section>',
-            '<section class="card" id="pane2" hidden>',
-              '<div class="ov-user">',
-                '<img class="ov-img" id="ovAvatar" style="display:none">',
-                '<div class="ov-ph" id="ovFallback">我</div>',
-                '<div><div class="ov-name" id="ovName">—</div><div class="ov-sub" id="ovSub"></div></div>',
-              '</div>',
-              '<div class="ov-stats">',
-                '<div><small>会话列表</small><b id="stConv">0</b><em>个</em></div>',
-                '<div><small>已获取消息</small><b id="stMsg">0</b><em>条</em></div>',
-                '<div><small>本地媒体</small><b id="stMedia">0</b><em>个</em></div>',
-              '</div>',
-              '<div class="row" style="justify-content:center">',
-                '<button class="pill dark" id="btnNewTask">新的导出任务</button>',
-                '<button class="pill" id="btnBrowseChats">阅读聊天记录</button>',
-                '<button class="pill" id="btnOpenDir2">打开导出文件夹</button>',
-              '</div>',
-              '<label class="lbl" style="margin-top:26px">最近导出</label>',
-              '<div class="exp-details" id="exportDetails"><div class="hint">暂无导出记录</div></div>',
-            '</section>',
           '</main>',
           '<section id="pane3" hidden>',
             '<aside class="rd-side">',
-              '<div class="rd-head">聊天记录 <span class="muted" id="rdSrcCnt"></span></div>',
+              '<div class="rd-head"><span>聊天记录 <span class="muted" id="rdSrcCnt"></span></span>' +
+                '<span class="rd-head-tools">' +
+                  '<button class="msg-tool" id="rdStatsBtn" title="数据概览">' +
+                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg>' +
+                  '</button>' +
+                  '<button class="msg-tool" id="rdOpenDir" title="打开导出文件夹">' +
+                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h3.1l1.9 2.2h6.6A2.2 2.2 0 0 1 20.5 9.4v7.4A2.2 2.2 0 0 1 18.3 19H5.7a2.2 2.2 0 0 1-2.2-2.2z"/></svg>' +
+                  '</button>' +
+                  '<div class="rd-stats" id="rdStats" hidden>' +
+                    '<div class="rs"><span>已下载会话</span><span class="v"><b id="stConv">0</b><em>个</em></span></div>' +
+                    '<div class="rs"><span>已获取消息</span><span class="v"><b id="stMsg">0</b><em>条</em></span></div>' +
+                    '<div class="rs"><span>本地媒体</span><span class="v"><b id="stMedia">0</b><em>个</em></span></div>' +
+                    '<div class="rs" title="exports/ 里这些会话文件夹的总大小：媒体文件 + JSON / HTML / TXT / CSV"><span>占用空间</span><span class="v"><b id="stBytes">—</b></span></div>' +
+                  '</div>' +
+                '</span></div>',
               '<div class="rd-list" id="rdSideList"></div>',
               '<button class="pill" id="rdRefresh" style="margin:10px 12px">刷新列表</button>',
             '</aside>',
             '<div class="rd-main">',
               '<div class="rd-toolbar">',
                 '<div class="rd-title" id="rdTitle">选择左侧记录</div>',
-                // 只导了 JSON 时媒体还没下载：在名字与搜索框之间给一条提示 + 补下载按钮
-                '<span class="medgap" id="rdMedGap" hidden>' +
-                  '<span class="mg-t" id="rdMedGapTxt"></span>' +
-                  '<button class="pill" id="rdMedGapBtn">⬇ 下载</button>' +
-                '</span>',
+                // 只导了 JSON 时媒体还没下载：一颗红按钮，明细在悬停提示里
+                '<button class="medgap" id="rdMedGap" hidden>⬇ 下载</button>',
                 '<input type="text" class="text" id="rdSearch" placeholder="搜索消息…">',
                 '<span class="rd-tools">',
                   '<span class="msg-tool-wrap">',
@@ -4080,10 +4429,10 @@
                   '<button class="msg-tool" id="rdVoiceBtn" title="下载语音">',
                     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3.5" width="6" height="10.5" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></svg>',
                   '</button>',
-                  '<button class="msg-tool" id="rdAsrBtn" title="语音转文字（勾选要转写的语音，逐条调用模型）">',
+                  '<button class="msg-tool" id="rdAsrBtn" title="语音转文字">',
                     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 14v-4"/><path d="M8 18V6"/><path d="M12 15v-6"/><path d="M16 17.5v-11"/><path d="M20 13v-2"/><path d="M3 21h18"/></svg>',
                   '</button>',
-                  '<button class="msg-tool" id="rdEmojiBtn" title="导出表情包（区分抖音自带 / 用户添加）">',
+                  '<button class="msg-tool" id="rdEmojiBtn" title="导出表情包">',
                     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 14s1.3 1.8 3.5 1.8 3.5-1.8 3.5-1.8"/><path d="M9 9.8h.01"/><path d="M15 9.8h.01"/></svg>',
                   '</button>',
                   '<button class="msg-tool" id="rdDetailBtn" title="会话详情">',
@@ -4114,6 +4463,12 @@
           '<div class="pm-foot"><button class="big" id="pmStop" hidden>停止</button></div>',
         '</div>',
       '</div>',
+      '<div id="dyce-dlg"><div class="dlg-card">',
+        '<div class="dlg-t" id="dlgT"></div>',
+        '<div class="dlg-b" id="dlgB"></div>',
+        '<div class="dlg-foot" id="dlgF"></div>',
+      '</div></div>',
+      '<div class="rd-ctx" id="rdCtx" hidden></div>',
       '<div class="rd-lightbox" id="rdLightbox" hidden><img id="rdLightboxImg" alt=""></div>',
       '<div class="gal-overlay" id="rdGalOverlay" hidden>',
         '<div class="gal-modal">',
@@ -4191,8 +4546,7 @@
           '<div class="row" style="margin-top:8px">',
             '<input class="text" id="setApiKey" type="password" placeholder="API Key（留空＝不修改）" style="flex:1">',
             '<input class="text" id="setModel" placeholder="模型名" style="flex:0 0 170px"></div>',
-          '<div class="row" style="margin-top:8px;justify-content:space-between">',
-            '<span class="hint" id="setModelStat" style="margin:0">未配置</span>',
+          '<div class="row" style="margin-top:8px;justify-content:flex-end">',
             '<span style="display:flex;gap:8px">',
               '<button class="pill" id="setClearKey" title="只删除本机保存的 API Key，Base URL 和模型名保留">清除 Key</button>',
               '<button class="pill" id="setTestModel" title="合成一段「你好」语音上传，验证接口能否正确返回">▶ 测试</button>',
@@ -4202,7 +4556,7 @@
           '<div class="notice" id="setNotice"></div>',
           '<label class="lbl">关于</label>',
           '<p class="hint">抖音聊天记录导出器 v' + escHtml(window.__DYIN_VERSION || '1.1') + '<br>' +
-            '数据仅保存在本机（Data/ 登录态、exports/ 导出文件），不上传任何服务器。<br>' +
+            '数据仅保存在本机，不上传任何服务器。<br>' +
             '模型 API Key 用 Windows 账号绑定的 DPAPI 加密存放，界面里只显示掩码。<br>' +
             '仅限备份本人账号数据，请勿传播导出内容。</p>',
           '<div class="row" style="justify-content:flex-end;margin-top:16px">',
@@ -4232,7 +4586,6 @@
 
     /* 事件绑定 */
     $('#tab1').addEventListener('click', function () { showStep('1'); });
-    $('#tab2').addEventListener('click', function () { showStep('2'); });
     $('#railChats').addEventListener('click', function () { showStep('reader'); });
     $('#railAi').addEventListener('click', function () { showStep('ai'); });
     $('#railMe').addEventListener('click', hideShell);
@@ -4322,9 +4675,6 @@
     });
     $('#btnBrowseDir').addEventListener('click', browseDir);
     $('#setOpenData').addEventListener('click', openExports);
-    $('#btnOpenDir2').addEventListener('click', openExports);
-    $('#btnNewTask').addEventListener('click', function () { showStep('1'); });
-    $('#btnBrowseChats').addEventListener('click', function () { showStep('reader'); });
     $('#btnRefresh').addEventListener('click', function () { refreshConversations(); });
     $('#btnCurrent').addEventListener('click', useCurrent);
     $('#btnSelectAll').addEventListener('click', toggleSelectAll);
@@ -4412,9 +4762,42 @@
     });
     $('#rdRefresh').addEventListener('click', readerRefreshSide);
     $('#rdSearch').addEventListener('input', function () { readerRender(); });
-    $('#rdMedGapBtn').addEventListener('click', function (e) {
+    $('#rdMedGap').addEventListener('click', function (e) {
       e.stopPropagation();
       downloadMissingMedia();
+    });
+    // 右键媒体 → 单独保存
+    $('#rdList').addEventListener('contextmenu', function (e) {
+      var m = ctxMediaOf(e.target);
+      if (!m) return;                 // 文字 / 没下载的东西：不拦系统菜单
+      e.preventDefault();
+      ctxOpen(e, [{ label: '⬇ ' + m.label, fn: function () { ctxSaveMedia(m); } }]);
+    });
+    // 右键左侧列表 → 置顶 / 删除整个会话文件夹
+    $('#rdSideList').addEventListener('contextmenu', function (e) {
+      var d = e.target && e.target.closest ? e.target.closest('.rd-item') : null;
+      if (!d || !d.dataset.key) return;
+      e.preventDefault();
+      ctxOpen(e, sideActions(d.dataset.key));
+    });
+    $('#rdCtx').addEventListener('click', function (e) {
+      var ci = e.target && e.target.closest ? e.target.closest('.ci') : null;
+      if (!ci) return;
+      var i = Array.prototype.indexOf.call(ci.parentNode.children, ci);
+      var a = ctxActions[i];
+      ctxClose();
+      if (a && a.fn) a.fn();
+    });
+    document.addEventListener('mousedown', function (e) {
+      var m = $('#rdCtx');
+      if (m && !m.hidden && !(e.target.closest && e.target.closest('#rdCtx'))) ctxClose();
+    }, true);
+    $('#rdList').addEventListener('scroll', ctxClose);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') ctxClose(); });
+    window.addEventListener('blur', ctxClose);
+    // 对话框：点空白处（遮罩）等同于「知道了」
+    $('#dyce-dlg').addEventListener('click', function (e) {
+      if (e.target === this) dlHide();
     });
     // 阅读器里点链接（分享视频的「▶ 打开视频」）会整页跳走：跳之前记下当前记录与位置
     $('#rdList').addEventListener('click', function (e) {
@@ -4424,11 +4807,21 @@
     }, true);
     // 工具栏：日历 / 图片浏览 / 语音下载 / 会话详情
     $('#rdCalBtn').addEventListener('click', function (e) { e.stopPropagation(); calToggle(); });
+    // 侧栏标题上的「数据概览」下拉与「打开导出文件夹」
+    $('#rdStatsBtn').addEventListener('click', function (e) { e.stopPropagation(); statsToggle(); });
+    $('#rdOpenDir').addEventListener('click', function (e) {
+      e.stopPropagation();
+      statsClose();          // 资源管理器会抢焦点，浮层留在原地会看着像没关
+      openExports();
+    });
     document.addEventListener('click', function (e) {
       var rc = $('#rangeCal');
       if (rc && !rc.hidden && !(e.target && e.target.closest &&
           (e.target.closest('#rangeCal') || e.target.closest('#dateStartBtn') ||
            e.target.closest('#dateEndBtn')))) rangeCalClose();
+      var st = $('#rdStats');
+      if (st && !st.hidden && !(e.target && e.target.closest &&
+          (e.target.closest('#rdStats') || e.target.closest('#rdStatsBtn')))) statsClose();
       var cal = $('#rdCal');
       if (!cal || cal.hidden) return;
       if (e.target && e.target.closest &&

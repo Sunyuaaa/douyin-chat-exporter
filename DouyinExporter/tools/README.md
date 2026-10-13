@@ -24,7 +24,12 @@ node tools/check_html.js "exports/<人名>"  # 校验导出 HTML（气泡/内联
 node tools/check_render.js                # 接口层回归：buildRequest 字节比对 + schema 漂移 + 消息分类
 python tools/precheck_release.py          # 分发前检查：Data/、exports/、boot.log、明文 Key、缺 exe
 python tools/precheck_release.py --json   # 同上，机器可读（safe_to_share 字段）
+powershell -NoProfile -ExecutionPolicy Bypass -File DouyinExporter/tools/restart.ps1   # 关掉正在跑的导出器再重开（改完 injector.js 用）
 ```
+
+`restart.ps1` 认三条判据：打包版进程名、可执行文件在本项目 `.venv` 里、以及「谁的 WebView2 子进程带着本项目
+`Data\`」（最后这条是为了抓「用系统 Python 直接跑 app.py」——命令行里看不出目录）。加 `-DryRun` 只列出会关
+哪些进程，什么都不杀。适合存成 Qoder 的快捷 Action。
 
 `check_render.js` 靠 `injector.js` 里的 `CHECK-START` / `CHECK-END` 两行注释抠代码，改动那两行注释会导致它失效。
 

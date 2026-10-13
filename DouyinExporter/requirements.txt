@@ -13,7 +13,8 @@ websocket-client>=1.0
 pyinstaller>=6.0
 
 # 语音转文字转码：抖音语音是 m4a，而部分网关（如 MiMo）的 input_audio 只收 wav/mp3，
-# 需要 ffmpeg。系统装了 ffmpeg 并加入 PATH（或把 ffmpeg.exe 放在程序目录）就不必装这个。
-# 注意：它自带约 87MB 的 ffmpeg 二进制，打包 exe 时被 spec 有意排除以控制体积，
-# 所以只有源码方式运行时这一档才有效；exe 用户走前两档。
+# 需要 ffmpeg。系统装了 ffmpeg 并加入 PATH（或把 ffmpeg.exe 放在程序目录）会优先用它们。
+# 注意：它自带约 87MB 的 ffmpeg 二进制。源码方式直接从这里取；
+# 打包单文件 exe 时也会一起收进包里（DouyinExporter.spec 的 excludes 已清空），
+# 代价是 exe 体积和首启动解压时间上升。
 imageio-ffmpeg>=0.5

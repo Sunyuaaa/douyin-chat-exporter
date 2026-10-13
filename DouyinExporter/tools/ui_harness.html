@@ -102,27 +102,35 @@ window.pywebview = { api: {
   cancel_export: function (i) { delete chunks[i]; return { ok: 1 }; },
   get_exports_dir: function () { return { ok: 1, path: 'D:/harness/exports' }; },
   list_export_convs: function () {
+    /* size 与 app.py 同口径：整个会话文件夹（快照 + 媒体，媒体按每个 2KB 估），
+       不是只有 JSON 那一个文件——否则侧栏「已导出 X MB」和概览「占用空间」对不上 */
     return { ok: 1, convs: Object.keys(exportsWritten).filter(function (k) { return k.endsWith('.json'); })
       .map(function (k) {
         var m = /"total"\s*:\s*(\d+)/.exec(exportsWritten[k].slice(0, 4096));
-        return { name: k.replace('.json', ''), size: exportsWritten[k].length,
+        var nm = k.replace('.json', '');
+        return { name: nm, size: exportsWritten[k].length + (mockMediaCount[nm] || 0) * 2048,
           mtime: Date.now(), total: m ? +m[1] : null };
       }) };
   },
   overview_stats: function () {
-    /* 与 app.py 同口径：按 exports/ 里的 JSON meta.total 与 media/ 文件数汇总 */
-    var per = {}, msgs = 0, media = 0;
-    Object.keys(exportsWritten).forEach(function (k) {
-      if (!k.endsWith('.json')) return;
-      var nm = k.replace('.json', '');
-      var m = /"total"\s*:\s*(\d+)/.exec(exportsWritten[k].slice(0, 4096));
+    /* 与 app.py 同口径：遍历「会话」= 有 JSON 快照的 ∪ 下过媒体的，
+       消息数取 JSON 头部 meta.total，媒体数取 mockMediaCount，bytes = 快照字节 + 媒体字节 */
+    var per = {}, msgs = 0, media = 0, bytes = 0;
+    var names = {};
+    Object.keys(exportsWritten).forEach(function (k) { if (k.endsWith('.json')) names[k.replace('.json', '')] = 1; });
+    Object.keys(mockMediaCount).forEach(function (n) { names[n] = 1; });
+    Object.keys(names).forEach(function (nm) {
+      var snap = exportsWritten[nm + '.json'] || '';
+      var m = /"total"\s*:\s*(\d+)/.exec(snap.slice(0, 4096));
       var t = m ? +m[1] : 0;
       var mm = mockMediaCount[nm] || 0;
+      if (!t && !mm) return;                     /* 和 app.py 一样：空壳目录不算一个会话 */
       per[nm] = { total: t, media: mm };
       msgs += t; media += mm;
+      bytes += snap.length + mm * 2048;          /* 媒体按每个 2KB 估 */
     });
     return { ok: true, convs: Object.keys(per).length, messages: msgs,
-      media: media, perConv: per };
+      media: media, bytes: bytes, perConv: per };
   },
   begin_read: function (c) {
     var s = exportsWritten[c + '.json']; if (!s) return { ok: 0, error: '不存在' };
@@ -143,6 +151,21 @@ window.pywebview = { api: {
     return { ok: 1, name: lab + '_' + rels.length + '个.zip', count: rels.length }; },
   choose_export_dir: function () { return { ok: 0 }; },
   open_exports: function () { window.__dl('open_exports 被调用'); return 'ok'; },
+  /* 右键「单独保存」：记下参数并假装用户选了 Downloads 里的同名文件 */
+  save_media_as: function (conv, rel) {
+    window.__saveCalls = (window.__saveCalls || []); window.__saveCalls.push([conv, rel]);
+    return { ok: 1, path: 'C:\\Users\\harness\\Downloads\\' + String(rel).split('/').pop(),
+      name: String(rel).split('/').pop(), size: 2048 };
+  },
+  /* 右键删除整个会话文件夹：把 mock 的 exports 记录清掉，没这个会话时照 app.py 一样拒绝 */
+  delete_export_conv: function (name) {
+    window.__delCalls = (window.__delCalls || []); window.__delCalls.push(name);
+    var key = name + '.json';
+    if (!exportsWritten[key]) return { ok: 0, error: '找不到这个会话文件夹' };
+    var bytes = exportsWritten[key].length + (mockMediaCount[name] || 0) * 2048;
+    delete exportsWritten[key]; delete mockMediaCount[name];
+    return { ok: 1, name: name, bytes: bytes };
+  },
   download_one: function (conv, task) {
     return new Promise(function (res) {
       setTimeout(function () {

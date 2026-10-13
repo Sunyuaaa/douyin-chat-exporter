@@ -221,6 +221,42 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         media.process_task = real_pt
 
+# ---------- 8b) 右键单独保存：只许读 exports/<会话>/media/ 下的真实文件 ----------
+# 只测「该拒绝的分支」——文件真存在时会弹系统另存为框，离线测试里不能弹。
+with tempfile.TemporaryDirectory() as tmp:
+    api = fresh_api(tmp)
+    r1 = api.save_media_as("某人", "media/../../../../Windows/win.ini")
+    chk("穿越路径被拒（不弹框、不读围栏外的文件）",
+        r1["ok"] is False and "不存在" in r1["error"], str(r1))
+    r2 = api.save_media_as("某人", "etc/passwd")
+    chk("非 media/ 前缀被拒", r2["ok"] is False, str(r2))
+    r3 = api.save_media_as("某人", "media/images/nope.jpg")
+    chk("文件不存在时给明确原因", r3["ok"] is False and "不存在" in r3["error"], str(r3))
+    chk("_media_file 对越界返回 None", api._media_file("某人", "media/../boot.log") is None)
+
+# ---------- 8c) 右键删除整个会话文件夹：不可恢复，围栏必须严 ----------
+with tempfile.TemporaryDirectory() as tmp:
+    api = fresh_api(tmp)
+    me = app.EXPORTS_DIR / "某人"
+    (me / "media" / "images").mkdir(parents=True)
+    (me / "某人.json").write_text('{"messages": []}', encoding="utf-8")
+    (me / "media" / "images" / "a.jpg").write_bytes(b"y" * 5000)
+    other = app.EXPORTS_DIR / "别人"
+    other.mkdir()
+    (other / "别人.json").write_text('{"messages": []}', encoding="utf-8")
+    bad = api.delete_export_conv("../别人")
+    chk("路径穿越的名字直接拒", bad["ok"] is False, str(bad)[:80])
+    bad2 = api.delete_export_conv("某人/../别人")
+    chk("带分隔符的名字直接拒", bad2["ok"] is False, str(bad2)[:80])
+    nf = api.delete_export_conv("没这个会话")
+    chk("没有对应文件夹时报「找不到」而不是删点别的",
+        nf["ok"] is False and "找不到" in nf["error"], str(nf)[:80])
+    ok = api.delete_export_conv("某人")
+    chk("删掉整个会话文件夹并回报释放字节",
+        ok["ok"] and ok["bytes"] >= 5000 and not me.exists(), str(ok)[:90])
+    chk("只删指定的那一个，别的会话不受影响",
+        other.exists() and (other / "别人.json").exists())
+
 # ---------- 9) 子进程不能闪 cmd 黑框 ----------
 # pythonw / console=False 的父进程 spawn 控制台程序会各开一个窗口（语音转码=每条一次）。
 with tempfile.TemporaryDirectory() as tmp:
@@ -262,7 +298,7 @@ with tempfile.TemporaryDirectory() as tmp:
         app.subprocess.run, app.shutil.which = real_run, real_which
         media.subprocess.run, media.shutil.which = real_mrun, real_mwhich
 
-# ---------- ffmpeg 查找顺序（exe 版没有 venv，必须能认「放在软件旁边的 ffmpeg.exe」）----------
+# ---------- ffmpeg 查找顺序（PATH → 程序目录的 ffmpeg.exe → 内置 imageio-ffmpeg）----------
 with tempfile.TemporaryDirectory() as tmp:
     real_base, real_which = app.BASE, app.shutil.which
     real_mod = sys.modules.get("imageio_ffmpeg")
@@ -275,7 +311,7 @@ with tempfile.TemporaryDirectory() as tmp:
         chk("PATH 没有时认程序目录里的 ffmpeg.exe",
             app.ffmpeg_exe() == str(app.BASE / "ffmpeg.exe"), str(app.ffmpeg_exe()))
         (app.BASE / "ffmpeg.exe").unlink()
-        sys.modules["imageio_ffmpeg"] = None          # 让 import 直接失败，模拟 exe 里被排除
+        sys.modules["imageio_ffmpeg"] = None          # 让 import 直接失败，模拟第三档也没有
         chk("三档都没有 → None（调用方给中文提示）", app.ffmpeg_exe() is None)
     finally:
         app.BASE, app.shutil.which = real_base, real_which
@@ -353,6 +389,12 @@ with tempfile.TemporaryDirectory() as tmp:
     convs = api.list_export_convs()["convs"]
     mine = [c for c in convs if c["name"] == "某人"]
     chk("list_export_convs 带出条数", len(mine) == 1 and mine[0]["total"] == 4059, str(mine)[:90])
+    # 侧栏那行「已导出 X MB」= 整个会话文件夹，含媒体；只报 JSON 大小会和概览「占用空间」对不上
+    want = sum(p.stat().st_size for p in (app.EXPORTS_DIR / "某人").rglob("*") if p.is_file())
+    json_only = (app.EXPORTS_DIR / "某人" / "某人.json").stat().st_size
+    chk("list_export_convs 的 size 含媒体（比 JSON 单独大，且等于目录总字节）",
+        len(mine) == 1 and mine[0]["size"] == want and want > json_only,
+        "size=%s 目录=%s 仅JSON=%s" % (mine[0]["size"], want, json_only))
     (app.EXPORTS_DIR / "无条数").mkdir()
     (app.EXPORTS_DIR / "无条数" / "无条数.json").write_text('{"messages": []}', encoding="utf-8")
     bad = [c for c in api.list_export_convs()["convs"] if c["name"] == "无条数"]
@@ -373,6 +415,10 @@ with tempfile.TemporaryDirectory() as tmp:
     st = api.overview_stats()
     chk("overview_stats 每会话明细（.txt/.zip 不计入媒体）",
         st["ok"] and st["perConv"].get("概览") == {"total": 77, "media": 4}, str(st["perConv"])[:120])
+    want_bytes = sum(p.stat().st_size for p in (app.EXPORTS_DIR / "概览").rglob("*") if p.is_file())
+    chk("overview_stats 的 bytes 覆盖该会话目录里所有文件（媒体 + JSON/zip 都算）",
+        st["bytes"] >= want_bytes and want_bytes > 0,
+        "bytes=%s ≥ 概览目录 %s 字节" % (st.get("bytes"), want_bytes))
     chk("overview_stats 汇总值覆盖各会话",
         st["messages"] >= 77 + 4059 and st["media"] >= 4 and st["convs"] >= 2,
         "msgs=%s media=%s convs=%s" % (st.get("messages"), st.get("media"), st.get("convs")))
@@ -384,7 +430,8 @@ with tempfile.TemporaryDirectory() as tmp:
     app.EXPORTS_DIR = empty
     st2 = api.overview_stats()
     chk("没有 exports 时返回全 0 不报错",
-        st2["ok"] and st2["messages"] == 0 and st2["media"] == 0 and st2["convs"] == 0, str(st2)[:90])
+        st2["ok"] and st2["messages"] == 0 and st2["media"] == 0 and st2["convs"] == 0
+        and st2["bytes"] == 0, str(st2)[:90])
 
 # ---------- 12) 标题栏配色 / 主题记忆 / 图标文件 ----------
 with tempfile.TemporaryDirectory() as tmp:

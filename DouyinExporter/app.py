@@ -276,8 +276,9 @@ def _silent_unlink(p: Path):
 def ffmpeg_exe():
     """找一个能用的 ffmpeg，顺序：
     ① 系统 PATH 里的 ffmpeg；
-    ② 放在程序自己目录下的 ffmpeg.exe（单文件 exe 版没有 venv，这是最省事的补法）；
-    ③ pip 装的 imageio-ffmpeg（自带二进制，源码版可用；exe 里被有意排除，见 spec 注释）。
+    ② 放在程序自己目录下的 ffmpeg.exe（想换更新/更小的版本时用它覆盖内置的）；
+    ③ pip 装的 imageio-ffmpeg（源码版走 venv；单文件 exe 也已把它自带的二进制打进包里，
+       见 spec 里 excludes 的注释，所以 exe 版开箱就有转码能力）。
     都没有 → None（调用方给出可操作的中文提示）。"""
     exe = shutil.which("ffmpeg")
     if exe:
@@ -304,8 +305,9 @@ def to_chat_audio(src: Path):
         return None, False, (
             "这个网关的 input_audio 只接受 wav/mp3，而本机语音是 %s，系统里也没有可用的 ffmpeg，"
             "无法转码。三个办法：① 装系统 ffmpeg 并加入 PATH（如 winget install Gyan.FFmpeg）；"
-            "② 下载单文件 ffmpeg.exe 放到本软件同目录（exe 版也能直接认）；"
-            "③ 源码版在本目录 .venv 里 pip install imageio-ffmpeg。"
+            "② 下载单文件 ffmpeg.exe 放到本软件同目录（exe 版也优先认它）；"
+            "③ 源码版在本目录 .venv 里 pip install imageio-ffmpeg（exe 版已内置这一份，"
+            "走到这条提示说明内置二进制没跑起来）。"
             "或者改用带 /audio/transcriptions 端点的 OpenAI 兼容网关，那种可以直接收 m4a。" % src.suffix)
     import tempfile
     out = Path(tempfile.gettempdir()) / ("dyce_asr_%s.mp3" % uuid.uuid4().hex[:8])
@@ -476,7 +478,10 @@ class JsApi:
         return {"ok": True, "path": str(EXPORTS_DIR)}
 
     def list_export_convs(self):
-        """扫描 exports/ 下已导出 JSON 的会话，供阅读器列出可读记录。"""
+        """扫描 exports/ 下已导出 JSON 的会话，供阅读器列出可读记录。
+        size 是**整个会话文件夹**的实际字节数（媒体 + 各种导出格式都算），
+        不是 JSON 那一个文件——以前只报 JSON 大小，7.7MB 的快照其实占了 394MB，
+        和「数据概览 · 占用空间」对不上。"""
         out = []
         try:
             if EXPORTS_DIR.exists():
@@ -486,12 +491,42 @@ class JsApi:
                     f = d / (d.name + ".json")
                     if f.exists():
                         st = f.stat()
-                        out.append({"name": d.name, "size": st.st_size,
+                        out.append({"name": d.name, "size": self._dir_stats(d)[0],
                                     "mtime": int(st.st_mtime),
                                     "total": self._json_total(f)})
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
         return {"ok": True, "convs": out}
+
+    def _dir_stats(self, d):
+        """返回 (目录内所有文件字节数, 其中算作媒体的文件数)。
+        媒体只算 `media/` 子目录下的（.txt 转写缓存 / .zip / .json 不算），
+        否则会话根上那份 HTML、CSV 会被当成「媒体个数」。
+        用 scandir 手工递归：rglob + is_file 在几千个小文件上要 0.5 秒以上，
+        而这个列表每次进阅读器都要跑一遍。"""
+        total = 0
+        media_n = 0
+        media_root = os.path.join(str(d), "media") + os.sep
+        stack = [str(d)]
+        while stack:
+            cur = stack.pop()
+            try:
+                with os.scandir(cur) as it:
+                    for e in it:
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append(e.path)
+                            elif e.is_file(follow_symlinks=False):
+                                total += e.stat().st_size
+                                in_media = e.path.startswith(media_root) or \
+                                    os.path.dirname(e.path) == os.path.join(str(d), "media")
+                                if in_media and Path(e.path).suffix.lower() not in self._NON_MEDIA:
+                                    media_n += 1
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        return total, media_n
 
     @staticmethod
     def _json_total(path):
@@ -508,12 +543,14 @@ class JsApi:
     _NON_MEDIA = (".txt", ".zip", ".json")
 
     def overview_stats(self):
-        """概览页三个数字的「本机已有」口径。
+        """概览三个数字 + 占用空间的「本机已有」口径。
 
         以前只统计页面内存里的 state.msgByConv / mediaPaths，重启软件后内存是空的，
         于是本机明明躺着几千条消息、上千个媒体，界面却显示 0。
+        bytes = 这些会话文件夹里所有文件的字节数（媒体 + JSON/HTML/TXT/CSV/zip 都算），
+        就是「下载这些东西占了多少磁盘」。
         """
-        out = {"convs": 0, "messages": 0, "media": 0, "perConv": {}}
+        out = {"convs": 0, "messages": 0, "media": 0, "bytes": 0, "perConv": {}}
         try:
             if EXPORTS_DIR.exists():
                 for d in sorted(EXPORTS_DIR.iterdir()):
@@ -521,22 +558,18 @@ class JsApi:
                         continue
                     f = d / (d.name + ".json")
                     total = self._json_total(f) if f.is_file() else None
-                    media = 0
-                    mdir = d / "media"
-                    if mdir.is_dir():
-                        for p in mdir.rglob("*"):
-                            if p.is_file() and p.suffix.lower() not in self._NON_MEDIA:
-                                media += 1
+                    size, media = self._dir_stats(d)   # 与列表「已导出 X MB」同一口径
                     if not total and not media:
                         continue
                     out["convs"] += 1
                     out["messages"] += total or 0
                     out["media"] += media
+                    out["bytes"] += size
                     out["perConv"][d.name] = {"total": total or 0, "media": media}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
         return {"ok": True, "convs": out["convs"], "messages": out["messages"],
-                "media": out["media"], "perConv": out["perConv"]}
+                "media": out["media"], "bytes": out["bytes"], "perConv": out["perConv"]}
 
     @staticmethod
     def _read_chunk_chars():
@@ -1072,6 +1105,69 @@ class JsApi:
                 return {"ok": True, "path": str(EXPORTS_DIR)}
             return {"ok": False}
         except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+
+    def _media_file(self, conv, rel):
+        """把 (会话, media/xxx) 解析成导出的绝对路径，越界或不存在返回 None。
+        与 begin_media 同一套围栏：只允许 exports/<会话>/media/ 下的真实文件。"""
+        try:
+            base = (EXPORTS_DIR / self._safe(conv)).resolve()
+            rel = str(rel or "")
+            if not rel.startswith("media/") or ".." in rel:
+                return None
+            path = (base / rel).resolve()
+            if not str(path).startswith(str(base)) or not path.is_file():
+                return None
+            return path
+        except Exception:  # noqa: BLE001
+            return None
+
+    def save_media_as(self, conv, rel):
+        """阅读器里右键「单独保存」：弹系统另存为框，把这一个媒体文件复制到用户选的位置。
+        只读不写导出内容——保存路径由用户定，软件不猜。"""
+        try:
+            src = self._media_file(conv, rel)
+            if not src:
+                return {"ok": False, "error": "文件不存在（可能还没下载）"}
+            import clr  # noqa: F401
+            clr.AddReference("System.Windows.Forms")
+            from System.Windows.Forms import SaveFileDialog, DialogResult
+            dlg = SaveFileDialog()
+            dlg.Title = "保存媒体文件"
+            dlg.FileName = str(src.name)
+            dl = Path.home() / "Downloads"
+            dlg.InitialDirectory = str(dl if dl.is_dir() else EXPORTS_DIR)
+            dlg.Filter = "所有文件 (*.*)|*.*"
+            if dlg.ShowDialog() != DialogResult.OK:
+                return {"ok": False, "cancelled": True}
+            dst = Path(str(dlg.FileName))
+            shutil.copyfile(str(src), str(dst))
+            log(f"[保存] {conv}/{rel} → {dst}（{dst.stat().st_size} 字节）")
+            return {"ok": True, "path": str(dst), "size": dst.stat().st_size,
+                    "name": dst.name}
+        except Exception as e:  # noqa: BLE001
+            log("[保存失败] save_media_as: " + traceback.format_exc()[-400:])
+            return {"ok": False, "error": str(e)}
+
+    def delete_export_conv(self, name):
+        """阅读器左侧右键「删除本机记录」：删掉 exports/<会话> 整个文件夹。
+        只允许删 EXPORTS_DIR 的直接子目录，且传进来的名字必须已经是净化过的会话名
+        （`_safe(name) == name`），否则一律不删——这是不可恢复的操作，宁可拒错。"""
+        try:
+            raw = str(name or "")
+            safe = self._safe(raw)
+            if not safe or safe != raw:
+                return {"ok": False, "error": "会话名不是净化后的目录名，没敢删"}
+            base = EXPORTS_DIR.resolve()
+            d = (EXPORTS_DIR / safe).resolve()
+            if d.parent != base or not d.is_dir():
+                return {"ok": False, "error": "找不到这个会话文件夹"}
+            size, _ = self._dir_stats(d)
+            shutil.rmtree(str(d))
+            log(f"[删除] 会话文件夹 {safe} 已删除（释放 {size} 字节）")
+            return {"ok": True, "name": safe, "bytes": size}
+        except Exception as e:  # noqa: BLE001
+            log("[删除失败] delete_export_conv: " + traceback.format_exc()[-400:])
             return {"ok": False, "error": str(e)}
 
     @staticmethod
